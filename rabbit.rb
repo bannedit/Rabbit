@@ -1,4 +1,6 @@
 # Quick and agile debugging ;]
+
+$:.unshift('.')
 require 'lib/metasm/metasm'
 
 module Rabbit
@@ -22,19 +24,27 @@ module Rabbit
 			# check if target is a path if it is look for existing processes matching the process name and get the pid
 			# if there is no pid start the process
 			if target.class == String
-				exe = target[ target.rindex('\\')+1, target.length-target.rindex('\\') ]
+				puts target
+				if target.include?('\\')
+					exe = target[ target.rindex('\\') + 1, target.length-target.rindex('\\') ] unless not target.include?('\\')
+				else
+					exe = target
+				end
 				proc = Metasm::WinOS.find_process(target)
 
 				if proc
 					@pid = proc.pid
 				else # make sure that target is a path, create the process if its not already running (Taken from metasm WinDbgAPI code)
-					if File.stat.executable?(target)
+					if target.include?(File::SEPARATOR) and File.executable?(target)
 						flags = Metasm::WinAPI::DEBUG_PROCESS
 						flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
 						startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
 						processinfo = [0, 0, 0, 0].pack('L*')
-						Metasm::WinAPI.createprocessa(nil, target, nil, nil, 0, flags, nil, nil, startupinfo, processinfo)
-						@pid = processinfo.unpack('LLL')[2]
+						if Metasm::WinAPI.createprocessa(nil, target, nil, nil, 0, flags, nil, nil, startupinfo, processinfo)
+							@pid = processinfo.unpack('LLL')[2]
+						else
+							puts("[error] - #{target} is not a valid executable file.")
+						end
 					else
 						puts("[error] - #{target} is not an executable file.")
 						exit(-1)
@@ -44,6 +54,8 @@ module Rabbit
 
 			# we should have a valid pid at this time
 			@dbg = super(@pid, debug_child)
+			loop
+			puts "debugging session finished"
 		end
 
 		def detach
@@ -59,7 +71,7 @@ module Rabbit
 			disasm = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip] )
 
 			case info.code
-			when WinAPI::STATUS_ACCESS_VIOLATION
+			when Metasm::WinAPI::STATUS_ACCESS_VIOLATION
 				status = "Access violation exception - #{info.code} "
 				if info.nparam >= 1
 					case info.info[0]
@@ -72,23 +84,25 @@ module Rabbit
 					end
 				end
 
+				puts status
 				puts regs
 				puts disasm
-				WinAPI::DBG_EXCEPTION_NOT_HANDLED
+				Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 
-			when WinAPI::STATUS_BREAKPOINT
+			when Metasm::WinAPI::STATUS_BREAKPOINT
 				status = "Break instruction exception - #{info.code} "
+				puts status
 				puts regs
 				puts disasm
-				WinAPI::DBG_CONTINUE
+				Metasm::WinAPI::DBG_CONTINUE
 
 			when WinAPI::STATUS_SINGLE_STEP
 				# not yet implemented
-				WinAPI::DBG_CONTINUE
+				Metasm::WinAPI::DBG_CONTINUE
 
 			else
 				# not yet implemented
-				WinAPI::DBG_EXCEPTION_NOT_HANDLED
+				Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 			end
 		end
 
