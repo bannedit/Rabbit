@@ -68,11 +68,14 @@ module Rabbit
 				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp]]
 
 			exe = Metasm::ExeFormat.new(Metasm::Ia32.new)
-			disasm = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip] )
+			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip] )
+			opcode = @mem[pid][ctx[:eip], inst.bin_length].to_s.unpack("H*")[0]
+
+			disasm = "%08x\t%s\t%s" % [ctx[:eip], opcode, inst.instruction]
 
 			case info.code
 			when Metasm::WinAPI::STATUS_ACCESS_VIOLATION
-				status = "Access violation exception - #{info.code} "
+				status = "Access violation exception - %08x " % info.code
 				if info.nparam >= 1
 					case info.info[0]
 					when 0
@@ -86,11 +89,11 @@ module Rabbit
 
 				puts status
 				puts regs
-				puts disasm
+				puts disas
 				Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 
 			when Metasm::WinAPI::STATUS_BREAKPOINT
-				status = "Break instruction exception - #{info.code} "
+				status = "Break instruction exception - %08x " % info.code
 				puts status
 				puts regs
 				puts disasm
