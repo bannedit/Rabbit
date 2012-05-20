@@ -55,26 +55,11 @@ class AsmListingWidget < DrawableWidget
 
 	def click(x, y)
 		set_caret_from_click(x - @arrow_zone_w, y)
-		@caret_x = 0 if @caret_x < 0
 	end
 
 	def rightclick(x, y)
 		click(x, y)
-		cx = (x - @arrow_zone_w) / @font_width
-		cy = y / @font_height
-		if cx > 0
-			m = new_menu
-			cm = new_menu
-			addsubmenu(cm, 'copy _word') { clipboard_copy(@hl_word) if @hl_word }
-			addsubmenu(cm, 'copy _line') { clipboard_copy(@line_text[cy]) if @line_text[cy] }
-			addsubmenu(cm, 'copy _all')  { clipboard_copy(@line_text.join("\r\n")) }	# XXX auto \r\n vs \n
-			addsubmenu(m, '_clipboard', cm)
-			addsubmenu(m, 'clone _window') { @parent_widget.clone_window(@hl_word, :listing) }
-			if @parent_widget.respond_to?(:extend_contextmenu)
-				@parent_widget.extend_contextmenu(self, m, @line_address[@caret_y])
-			end
-			popupmenu(m, x, y)
-		end
+		@parent_widget.clone_window(@hl_word, :listing)
 	end
 
 	def doubleclick(x, y)
@@ -136,7 +121,7 @@ class AsmListingWidget < DrawableWidget
 			if @hl_word and @hl_word != ''
 				stmp = str
 				pre_x = 0
-				while stmp =~ @hl_word_re
+				while stmp =~ /^(.*?)(\b#{Regexp.escape @hl_word}\b)/
 					s1, s2 = $1, $2
 					pre_x += s1.length * @font_width
 					hl_x = s2.length * @font_width
@@ -330,8 +315,6 @@ class AsmListingWidget < DrawableWidget
 		when :end
 			@caret_x = @line_text[@caret_y].to_s.length
 			update_caret
-		when :popupmenu
-			rightclick(@caret_x*@font_width + @arrow_zone_w+1, @caret_y*@font_height)
 		else return false
 		end
 		true
@@ -502,11 +485,11 @@ class AsmListingWidget < DrawableWidget
 							xlen ||= xref.len || 1 if xref.len
 							comment << " #{xref.type}#{xref.len}:#{Expression[xref.origin]}" if xref.origin
 						} if @dasm.xrefs[curaddr]
-						len = xlen if xlen and xlen >= 2	# db xref may point a string
+						len = xlen if xlen and xlen > 2	# db xref may point a string
 						comment = nil if comment.empty?
 						len = (1..len).find { |l| @dasm.xrefs[curaddr+l] or s.inv_export[s.ptr+l] or s.reloc[s.ptr+l] } || len
 						str = str[0, len] if len < str.length
-						str = str.pack('C*').unpack(@dasm.cpu.endianness == :big ? 'n*' : 'v*') if xlen == 2
+						str = str.pack('C*').unpack(@dasm.cpu.endianness == :big ? 'n*' : 'v*') if len == 2
 						if (xlen == 1 or xlen == 2) and asc = str.inject('') { |asc_, c|
 								case c
 								when 0x20..0x7e, 9, 10, 13; asc_ << c
@@ -567,7 +550,7 @@ class AsmListingWidget < DrawableWidget
 				str_c << ["#{Expression[curaddr]}    ", :address]
 				if @raw_data_length.to_i > 0
 					if s = @dasm.get_section_at(curaddr)
-						raw = s[0].read([aoff, @raw_data_length].min)
+						raw = s.read([aoff, @raw_data_length].min)
 						raw = raw.unpack('H*').first
 					else
 						raw = ''

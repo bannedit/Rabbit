@@ -13,7 +13,6 @@ class Elem
 	attr_reader :name, :attrs, :content, :style
 
 	IndentAdd = '  '
-	LineLenMax = 80
 	
 	def initialize(name, attrs=nil, content=nil)
 		@name = name
@@ -31,8 +30,10 @@ class Elem
 	end
 	
 	@@quotechars = {
-		'Ã¨' => '&egrave;',
-		'Ã«' => '&euml;',
+		'é' => '&eacute;',
+		'è' => '&egrave;',
+		'ë' => '&euml;',
+		'à' => '&agrave;',
 		'>' => '&gt;',
 		'<' => '&lt;',
 		'"' => '&quot;',
@@ -117,7 +118,7 @@ class Elem
 		elsif @name == 'pre'
 			s << @content.map { |c| c.to_s }.join.chomp << '</pre>'
 		else
-			if length(s) > LineLenMax
+			if length(s) > 80
 				sindent = indent + IndentAdd
 				sep = "\n"
 				@content.each { |c|
@@ -126,38 +127,13 @@ class Elem
 						if sep == ''
 							s << c.to_s(sindent).sub(/^\s+/, '')
 						else
-							news = c.to_s(sindent)
-							plen = s.length - (s.rindex("\n") || -1) - 1
-							plen -= 1 if s[-1, 1] == ' '
-							newss = news.sub(/^\s+/, '')
-							if not news.include?("\n") and s[-1] != ?> and
-									plen + 1 + newss.length <= LineLenMax
-								# concat inline tag to previous String
-								s << ' ' if s[-1, 1] != ' '
-								s << newss
-							else
-								s << sep if c.name =~ /^h\d$/ and c != @content.first
-								s << sep << news
-							end
+							s << sep << c.to_s(sindent)
 						end
 					when String
-						cw = c.split(/\s+/)
-						if @name == 'p' and c.object_id == @content.first.object_id
-							cw.shift if cw[0] == ''
-							s << "\n" << sindent
+						if c =~ /^\s+/ or (@name == 'p' and c == @content.first)
+							s << sep << sindent << c.sub(/^\s+/, '')
 						else
-							s << cw.shift.to_s
-						end
-						plen = s.length - (s.rindex("\n") || -1) - 1
-						while w = cw.shift
-							plen -= 1 if s[-1, 1] == ' '
-							if plen + 1 + w.length > LineLenMax
-								s << "\n" << sindent
-								plen = sindent.length
-							end
-							s << ' ' if s[-1, 1] != ' '
-							s << w
-							plen += w.length+1
+							s << c.sub(/\s+(\S+)/, "\n"+sindent+'\\1')
 						end
 						if c !~ /\s+$/
 							sep = ''
@@ -194,8 +170,7 @@ class Page < Elem
 
 	def to_s
 		'<?xml version="1.0" encoding="us-ascii" ?>'+"\n"+
-		'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"'+"\n"+
-		IndentAdd*2+'"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'+"\n"+
+		'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'+"\n"+
 		super.to_s
 	end
 end
@@ -273,8 +248,8 @@ class Txt2Html
 		puts "compiling #{outf}..." if $VERBOSE
 
 		@pathfix = outf.split('/')[0...-1].map { '../' }.join
-		out = compile(File.read(f).gsub("\r", '') + "\n\n")
-		File.open(outf, 'wb') { |fd| fd.write out.to_s.gsub("\r", '').gsub("\n", "\r\n") }
+		out = compile(File.read(f) + "\n\n")
+		File.open(outf, 'w') { |fd| fd.puts out }
 	end
 
 	def outfilename(f)
@@ -284,7 +259,6 @@ class Txt2Html
 	def compile(raw)
 		prev = ''
 		state = {}
-		anchors = {}
 		out = Html::Page.new
 		out.head << Html::Stylesheet.new(@pathfix + 'style.css')
 		flush = lambda {
@@ -294,7 +268,7 @@ class Txt2Html
 		}
 		raw.each_line { |l|
 			case l = l.chomp
-			when /^([=#*-])\1{3,}$/
+			when /^([=#-])\1{3,}$/
 				if prev.length > 0
 					# title
 					if    not state[:h1] or state[:h1] == $1
@@ -310,13 +284,7 @@ class Txt2Html
 					end
 					str = compile_string(prev)
 					state[:title] ||= str if e == 'h1'
-					if id = prev[/[a-z]\w+/i]
-						id = id.downcase
-						id += '_' while anchors[id]
-						anchors[id] = true
-						attr = { 'id' => id }
-					end
-					out.body << Html::Elem.new(e, attr).add(str)
+					out.body << Html::Elem.new(e).add(str)
 					prev = ''
 					flush[]
 				else
@@ -324,22 +292,13 @@ class Txt2Html
 					out.body << Html::Hr.new
 					flush[]
 				end
-			when /^([*-]+)\s+(.*)/
+			when /^[*-]\s+(.*)/
 				# list
-				bullet = $1
-				text = $2
-				if lst = state[:list] && state[:list][bullet]
-					state[:list].delete_if { |k, v| k.length > bullet.length }
-				else
-					flush[] if not state[:list]
-					state[:list] ||= {}
-					state[:list].delete_if { |k, v| k.length > bullet.length }
-					lst = state[:list][bullet] = Html::List.new
-					if pl = state[:list][bullet.chop]
-						pl.content.last.content << lst
-					else
-						out.body << lst
-					end
+				text = $1
+				if not lst = state[:list]
+					flush[]
+					lst = state[:list] = Html::List.new
+					out.body << lst
 				end
 				lst.add_line compile_string(text)
 
@@ -354,13 +313,8 @@ class Txt2Html
 			when /^\s*$/
 				flush[]
 			else
-				if state[:list]
-					lst = state[:list].sort.last[1]
-					lst.content.last.content << ' ' << compile_string(l)
-				else
-					prev << ' ' if prev.length > 0
-					prev << l
-				end
+				prev << ' ' if prev.length > 0
+				prev << l
 			end
 		}
 		flush[]
@@ -368,13 +322,13 @@ class Txt2Html
 		out
 	end
 
-	# handle **bold_words** *italic* `fixed` <links> **bold__word__with__underscore**
+	# handle **bold_words** *italic* `fixed` <links>
 	def compile_string(str)
 		o = [str]
 		on = []
 		o.each { |s|
 			while s.kind_of? String and o1 = s.index('**') and o2 = s.index('**', o1+2) and not s[o1..o2].index(' ')
-				on << s[0...o1] << Html::Elem.new('b').add(s[o1+2...o2].tr('_', ' ').gsub('  ', '_'))
+				on << s[0...o1] << Html::Elem.new('b').add(s[o1+2...o2].tr('_', ' '))
 				s = s[o2+2..-1]
 			end
 			on << s
@@ -383,7 +337,7 @@ class Txt2Html
 		on = []
 		o.each { |s|
 			while s.kind_of? String and o1 = s.index('*') and o2 = s.index('*', o1+1) and not s[o1..o2].index(' ')
-				on << s[0...o1] << Html::Elem.new('i').add(s[o1+1...o2].tr('_', ' ').gsub('  ', '_'))
+				on << s[0...o1] << Html::Elem.new('i').add(s[o1+1...o2].tr('_', ' '))
 				s = s[o2+1..-1]
 			end
 			on << s
@@ -409,20 +363,19 @@ class Txt2Html
 					when 'txt'
 						tg = outfilename(lnk)
 						Txt2Html.new(lnk)
-						on << Html::A.new(@pathfix + tg, File.basename(lnk, '.txt').tr('_', ' ').gsub('  ', '_'))
+						on << Html::A.new(@pathfix + tg, File.basename(lnk, '.txt').tr('_', ' '))
 					when 'jpg', 'png'
 						on << Html::Img.new(lnk)
 					end
 				else
-					on << Html::A.new(lnk, lnk)
 					if lnk =~ /\.txt$/
 						@@seen_nofile ||= []
 						if not @@seen_nofile.include? lnk
 							@@seen_nofile << lnk
 							puts "reference to missing #{lnk.inspect}"
 						end
-						on.last.hclass('brokenlink')
 					end
+					on << Html::A.new(lnk, lnk)
 				end
 			end
 			on << s
@@ -432,7 +385,6 @@ class Txt2Html
 end
 
 if __FILE__ == $0
-	$VERBOSE = true if ARGV.delete '-v'
 	if ARGV.empty?
 		Dir.chdir(File.expand_path(File.join(File.dirname(__FILE__), '../doc')))
 		ARGV.concat Dir['**/index.txt']

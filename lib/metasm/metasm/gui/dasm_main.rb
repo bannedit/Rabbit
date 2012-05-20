@@ -17,7 +17,7 @@ module Metasm
 module Gui
 # the main disassembler widget: this is a container for all the lower-level widgets that actually render the dasm state
 class DisasmWidget < ContainerChoiceWidget
-	attr_accessor :entrypoints, :gui_update_counter_max
+	attr_accessor :dasm, :entrypoints, :gui_update_counter_max
 	attr_accessor :keyboard_callback, :keyboard_callback_ctrl	# hash key => lambda { |key| true if handled }
 	attr_accessor :clones
 	attr_accessor :pos_history, :pos_history_redo
@@ -50,16 +50,6 @@ class DisasmWidget < ContainerChoiceWidget
 		addview :cstruct,   CStructWidget.new(@dasm, self)
 
 		view(:listing).grab_focus
-	end
-
-	attr_reader :dasm
-	# when updating @dasm, also update dasm for all views
-	def dasm=(d)
-		@dasm = d
-		view_indexes.each { |v|
-			w = view(v)
-			w.dasm = d if w.respond_to?(:'dasm=')
-		}
 	end
 
 	# start an idle callback that will run one round of @dasm.disassemble_mainiter
@@ -138,18 +128,16 @@ class DisasmWidget < ContainerChoiceWidget
 	end
 
 	# display the specified address
-	# the display first searches in the current view
-	# if it cannot display the address, the listing, graph and decompile views are tried (in that order)
+	# the display first searches in the current view (graph, listing, etc),
+	# if it cannot display the address all other views are tried in order
 	# the current focus address is saved in @pos_history (see focus_addr_back/redo)
-	# if quiet is false, a messagebox is popped if no view can display the address
+	# a messagebox is popped if no view can display the address unless quiet is true
 	def focus_addr(addr, viewidx=nil, quiet=false, *a)
 		viewidx ||= curview_index || :listing
 		return if not addr
-		return if viewidx == curview_index and addr == curaddr and a.empty?
+		return if viewidx == curview_index and addr == curaddr
 		oldpos = [curview_index, (curview.get_cursor_pos if curview)]
-		views = [viewidx, oldpos[0]]
-		views += [:listing, :graph, :decompile] & view_indexes
-		if views.compact.uniq.find { |i|
+		if [viewidx, oldpos[0], *view_indexes].compact.uniq.find { |i|
 			o_p = view(i).get_cursor_pos
 			if (view(i).focus_addr(addr, *a) rescue nil)
 				view(i).gui_update if i != oldpos[0]
@@ -157,7 +145,6 @@ class DisasmWidget < ContainerChoiceWidget
 				true
 			else
 				view(i).set_cursor_pos o_p
-				a.clear
 				false
 			end
 		}
@@ -324,7 +311,7 @@ class DisasmWidget < ContainerChoiceWidget
 	def list_strings
 		list = [['addr', 'string', 'length']]
 		@dasm.strings_scan { |o, str|
-			list << [Expression[o], str[0, 24].inspect, str.length]
+			list << [o, str[0, 24].inspect, str.length]
 		}
 		listwindow("list of strings", list) { |i| focus_addr i[0] }
 	end
@@ -352,7 +339,8 @@ class DisasmWidget < ContainerChoiceWidget
 		}
 	end
 
-	def prompt_backtrace(addr=curaddr)
+	def prompt_backtrace
+		addr = curaddr
 		inputbox('expression to backtrace', :text => curview.hl_word) { |e|
 			expr = IndExpression.parse_string(e)
 			bd = {}
@@ -389,80 +377,6 @@ class DisasmWidget < ContainerChoiceWidget
 				a = i[0].empty? ? i[2] : i[0]
 				focus_addr(a, nil, true)
  			}
-		}
-	end
-
-	# prompt the contant to use in place of some numeric value
-	def prompt_constant(di=curobj)
-		return if not di.kind_of? DecodedInstruction
-		di.each_expr { |e|
-			if e.lexpr.kind_of? Integer or e.lexpr.kind_of?(ExpressionString)
-				v = Expression[e.lexpr].reduce
-				lst = []
-				dasm.c_constants.each { |cn, cv| lst << [cn] if v == cv }
-				if not lst.empty?
-					default = Expression[v].to_s
-					lst << [default]
-					listwindow("constant for #{Expression[v]}", [['name']] + lst) { |a|
-						if a[0] == default
-							e.lexpr = v
-						else
-							e.lexpr = ExpressionString.new(v, a[0], :constant)
-						end
-						gui_update
-					}
-				end
-			end
-			if e.rexpr.kind_of? Integer or e.rexpr.kind_of?(ExpressionString)
-				v = Expression[e.rexpr].reduce
-				lst = []
-				dasm.c_constants.each { |cn, cv| lst << [cn] if v == cv }
-				if not lst.empty?
-					default = Expression[v].to_s
-					lst << [default]
-					listwindow("constant for #{Expression[v]}", [['name']] + lst) { |a|
-						if a[0] == default
-							e.rexpr = v
-						else
-							e.rexpr = ExpressionString.new(v, a[0], :constant)
-						end
-						gui_update
-					}
-				end
-			end
-		}
-	end
-
-	# prompt the struct to use for offset in a given instr
-	def prompt_struct_offset(di=curobj)
-		return if not di.kind_of? DecodedInstruction
-		off = nil
-		di.each_expr { |e|
-			# hit only ints after an actual '+' sign
-			# XXX this sucks more than ivans sister
-			if e.kind_of?(Expression) and e.op == :+ and e.lexpr and e.rexpr.kind_of?(Expression) and e.rexpr.op == :+ and not e.rexpr.lexpr
-				foo = e.rexpr.rexpr
-				if foo.kind_of?(Integer)
-					off = foo
-				elsif foo.kind_of?(ExpressionString) and foo.type == :structoff
-					off = foo.expr.reduce
-				end
-			end
-		}
-		raise 'cant see any offset there !' if not off
-		stlist = []
-		@dasm.c_parser.toplevel.struct.each_value { |st|
-			if st.kind_of?(C::Struct) and stm = st.findmember_atoffset(@dasm.c_parser, off) and stm.name
-				stlist << [st, stm]
-			end
-		}
-
-		default = Expression[off].to_s
-		list =  [['struct'], [default]] + stlist.map { |st, stm| ["#{st.name}.#{stm.name}"] }
-		listwindow("chose structure for offset #{Expression[off]}", list) { |a|
-			stn = a[0].split('.')[0] if a[0] != default
-			@dasm.patch_structoffset(di, stn, off)
-			gui_update
 		}
 	end
 
@@ -626,22 +540,20 @@ class DisasmWidget < ContainerChoiceWidget
 				curview.hl_word = w 
 				curview.redraw
 			}
-		when ?b; prompt_backtrace(curaddr)
-		when ?c; disassemble(curaddr)
-		when ?C; disassemble_fast(curaddr)
-		when ?d; toggle_data(curaddr)
+		when ?b; prompt_backtrace
+		when ?c; disassemble(curview.current_address)
+		when ?C; disassemble_fast(curview.current_address)
+		when ?d; toggle_data(curview.current_address)
 		when ?f; list_functions
 		when ?g; prompt_goto
 		when ?l; list_labels
-		when ?m; prompt_constant(curobj)
 		when ?n; rename_label(pointed_addr)
 		when ?o; toggle_expr_offset(curobj)
 		when ?p; playpause_dasm
 		when ?r; toggle_expr_char(curobj)
-		when ?t; prompt_struct_offset(curobj)
 		when ?v; $VERBOSE = ! $VERBOSE ; puts "#{'not ' if not $VERBOSE}verbose"	# toggle verbose flag
 		when ?x; list_xrefs(pointed_addr)
-		when ?;; add_comment(curaddr)
+		when ?;; add_comment(curview.current_address)
 
 		when ?\ ; toggle_view(:listing)
 		when :tab; toggle_view(:decompile)
@@ -673,12 +585,6 @@ class DisasmWidget < ContainerChoiceWidget
 		when /\.map$/; @dasm.load_map(f)
 		when /\.rb$/; @dasm.load_plugin(f)
 		else messagebox("unsupported file extension #{f}")
-		end
-	end
-
-	def extend_contextmenu(tg, menu, addr=nil)
-		if @parent_widget.respond_to?(:extend_contextmenu)
-			@parent_widget.extend_contextmenu(tg, menu, addr)
 		end
 	end
 end
@@ -755,9 +661,6 @@ class DasmWindow < Window
 	def loadfile(path, cpu='Ia32', exefmt=nil)
 		if exefmt
 			exefmt = Metasm.const_get(exefmt) if exefmt.kind_of? String
-			if exefmt.name.split('::').last == 'Shellcode'
-				exefmt = Shellcode.withcpu(cpu)
-			end
 		else
 			exefmt = AutoExe.orshellcode { cpu = Metasm.const_get(cpu) if cpu.kind_of? String ; cpu.new }
 		end
@@ -773,7 +676,6 @@ class DasmWindow < Window
 			end
 		}
 		(@dasm_widget ? DasmWindow.new : self).display(exe.disassembler)
-		self.title = "#{File.basename(path)} - metasm disassembler"
 		exe
 	end
 
@@ -805,10 +707,12 @@ class DasmWindow < Window
 		list_pr = OS.current.list_processes
 		Gui.idle_add {
 			if pr = list_pr.shift
-				list << [pr.pid, pr.path] if pr.path
+				path = pr.modules.first.path if pr.modules and pr.modules.first
+				#path ||= '<unk>'	# if we can't retrieve exe name, can't debug the process
+				list << [pr.pid, path] if path
 				true
 			elsif i
-				me = ::Process.pid.to_s
+				me = Process.pid.to_s
 				l = listwindow('running processes', list,
 					       :noshow => true,
 					       :color_callback => lambda { |le| [:grey, :palegrey] if le[0] == me }
@@ -817,7 +721,7 @@ class DasmWindow < Window
 				l.show
 				false
 			end
-		} if not list_pr.empty?
+		}
 	end
 
 	# reuse last @savefile to save dasm, prompt for file if undefined
@@ -858,7 +762,7 @@ class DasmWindow < Window
 		addsubmenu(filemenu, 'OPEN', '^o') { promptopen }
 		addsubmenu(filemenu, '_Debug') { promptdebug }
 		addsubmenu(filemenu, 'SAVE', '^s') { promptsave }
-		addsubmenu(filemenu, 'Save _as...') { promptsaveas }
+		addsubmenu(filemenu, 'Save as...') { promptsaveas }
 		addsubmenu(filemenu, 'CLOSE') {
 			if @dasm_widget
 				@dasm_widget.terminate
@@ -868,42 +772,39 @@ class DasmWindow < Window
 		}
 		addsubmenu(filemenu)
 
-		importmenu = new_menu
-		addsubmenu(importmenu, 'Load _map') {
+		iomenu = new_menu
+		addsubmenu(iomenu, 'Load _map') {
 			openfile('chose map file') { |file|
 				@dasm_widget.dasm.load_map(File.read(file)) if @dasm_widget
 			} if @dasm_widget
 		}
-		addsubmenu(importmenu, 'Load _C') {
-			openfile('chose C file') { |file|
-				@dasm_widget.dasm.parse_c(File.read(file)) if @dasm_widget
-			} if @dasm_widget
-		}
-		addsubmenu(filemenu, '_Import', importmenu)
-
-		exportmenu = new_menu
-		addsubmenu(exportmenu, 'Save _map') {
+		addsubmenu(iomenu, 'S_ave map') {
 			savefile('chose map file') { |file|
 				File.open(file, 'w') { |fd|
 					fd.puts @dasm_widget.dasm.save_map
 				} if @dasm_widget
 			} if @dasm_widget
 		}
-		addsubmenu(exportmenu, 'Save _asm') {
+		addsubmenu(iomenu, '_Save asm') {
 			savefile('chose asm file') { |file|
 				File.open(file, 'w') { |fd|
 					fd.puts @dasm_widget.dasm
 				} if @dasm_widget
 			} if @dasm_widget
 		}
-		addsubmenu(exportmenu, 'Save _C') {
+		addsubmenu(iomenu, 'Save _C') {
 			savefile('chose C file') { |file|
 				File.open(file, 'w') { |fd|
 					fd.puts @dasm_widget.dasm.c_parser
 				} if @dasm_widget
 			} if @dasm_widget
 		}
-		addsubmenu(filemenu, '_Export', exportmenu)
+		addsubmenu(filemenu, 'Load _C') {
+			openfile('chose C file') { |file|
+				@dasm_widget.dasm.parse_c(File.read(file)) if @dasm_widget
+			} if @dasm_widget
+		}
+		addsubmenu(filemenu, '_i/o', iomenu)
 		addsubmenu(filemenu)
 		addsubmenu(filemenu, 'QUIT') { destroy } # post_quit_message ?
 
@@ -973,7 +874,6 @@ class DasmWindow < Window
 		addsubmenu(views, 'De_compiled') { @dasm_widget.focus_addr(@dasm_widget.curaddr, :decompile) }
 		addsubmenu(views, 'Raw _opcodes') { @dasm_widget.focus_addr(@dasm_widget.curaddr, :opcodes) }
 		addsubmenu(views, '_Hex') { @dasm_widget.focus_addr(@dasm_widget.curaddr, :hex) }
-		addsubmenu(views, 'C S_truct') { @dasm_widget.focus_addr(@dasm_widget.curaddr, :cstruct) }
 		addsubmenu(views, 'Co_verage') { @dasm_widget.focus_addr(@dasm_widget.curaddr, :coverage) }
 		addsubmenu(views, '_Sections') { @dasm_widget.list_sections }
 		addsubmenu(views, 'St_rings') { @dasm_widget.list_strings }

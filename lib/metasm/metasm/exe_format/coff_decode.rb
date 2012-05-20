@@ -10,22 +10,16 @@ require 'metasm/exe_format/coff' unless defined? Metasm::COFF
 module Metasm
 class COFF
 	class OptionalHeader
-		decode_hook(:entrypoint) { |coff, ohdr|
-			coff.bitsize = (ohdr.signature == 'PE+' ? 64 : 32)
-		}
-
 		# decodes a COFF optional header from coff.cursection
 		# also decodes directories in coff.directory
 		def decode(coff)
-			return set_default_values(coff) if coff.header.size_opthdr == 0 and not coff.header.characteristics.include?('EXECUTABLE_IMAGE')
-			off = coff.curencoded.ptr
+			return set_default_values(coff) if coff.header.size_opthdr == 0
 			super(coff)
-			nrva = (coff.header.size_opthdr - (coff.curencoded.ptr - off)) / 8
-			nrva = @numrva if nrva < 0
 
-			if nrva > DIRECTORIES.length or nrva != @numrva
-				puts "W: COFF: Weird directories count #{@numrva}" if $VERBOSE
-				nrva = DIRECTORIES.length if nrva > DIRECTORIES.length
+			nrva = @numrva
+			if @numrva > DIRECTORIES.length
+				puts "W: COFF: Invalid directories count #{@numrva}" if $VERBOSE
+				nrva = DIRECTORIES.length
 			end
 
 			coff.directory = {}
@@ -147,7 +141,7 @@ class COFF
 
 				@imports = []
 
-				ord_mask = 1 << (coff.bitsize-1)
+				ord_mask = 1 << (coff.optheader.signature == 'PE+' ? 63 : 31)
 				addrs.each { |a|
 					i = Import.new
 					if (a & ord_mask) != 0
@@ -173,7 +167,7 @@ class COFF
 	end
 
 	class ResourceDirectory
-		def decode(coff, edata = coff.curencoded, startptr = edata.ptr, maxdepth=3)
+		def decode(coff, edata = coff.cursection.encoded, startptr = edata.ptr)
 			super(coff, edata)
 
 			@entries = []
@@ -215,12 +209,10 @@ class COFF
 					e.subdir_p = e_ptr & 0x7fff_ffff
 					if startptr + e.subdir_p >= edata.length
 						puts 'W: COFF: invalid resource structure: directory too far' if $VERBOSE
-					elsif maxdepth > 0
+					else
 						edata.ptr = startptr + e.subdir_p
 						e.subdir = ResourceDirectory.new
-						e.subdir.decode coff, edata, startptr, maxdepth-1
-					else
-						puts 'W: COFF: recursive resource section' if $VERBOSE
+						e.subdir.decode coff, edata, startptr
 					end
 				else
 					e.dataentry_p = e_ptr
@@ -231,7 +223,7 @@ class COFF
 					e.reserved = coff.decode_word(edata)
 
 					if coff.sect_at_rva(e.data_p)
-						e.data = coff.curencoded.read(sz)
+						e.data = coff.cursection.encoded.read(sz)
 					else
 						puts 'W: COFF: invalid resource body offset' if $VERBOSE
 						break
@@ -311,12 +303,12 @@ class COFF
 			len -= 8
 			if len < 0 or len % 2 != 0
 				puts "W: COFF: Invalid relocation table length #{len+8}" if $VERBOSE
-				coff.curencoded.read(len) if len > 0
+				coff.cursection.encoded.read(len) if len > 0
 				@relocs = []
 				return
 			end
 
-			@relocs = coff.curencoded.read(len).unpack(coff.endianness == :big ? 'n*' : 'v*').map { |r| Relocation.new(r&0xfff, r>>12) }
+			@relocs = coff.cursection.encoded.read(len).unpack(coff.endianness == :big ? 'n*' : 'v*').map { |r| Relocation.new(r&0xfff, r>>12) }
 			#(len/2).times { @relocs << Relocation.decode(coff) }	# tables may be big, this is too slow
 		end
 	end
@@ -367,61 +359,14 @@ class COFF
 		end
 	end
 
-	class Cor20Header
-		def decode_all(coff)
-			if coff.sect_at_rva(@metadata_rva)
-				@metadata = coff.curencoded.read(@metadata_sz)
-			end
-			if coff.sect_at_rva(@resources_rva)
-				@resources = coff.curencoded.read(@resources_sz)
-			end
-			if coff.sect_at_rva(@strongnamesig_rva)
-				@strongnamesig = coff.curencoded.read(@strongnamesig_sz)
-			end
-			if coff.sect_at_rva(@codemgr_rva)
-				@codemgr = coff.curencoded.read(@codemgr_sz)
-			end
-			if coff.sect_at_rva(@vtfixup_rva)
-				@vtfixup = coff.curencoded.read(@vtfixup_sz)
-			end
-			if coff.sect_at_rva(@eatjumps_rva)
-				@eatjumps = coff.curencoded.read(@eatjumps_sz)
-			end
-			if coff.sect_at_rva(@managednativehdr_rva)
-				@managednativehdr = coff.curencoded.read(@managednativehdr_sz)
-			end
-		end
-	end
-
-	class DebugDirectory
-		def decode_inner(coff)
-			case @type
-			when 'CODEVIEW'
-				# XXX what is @pointer?
-				return if not coff.sect_at_rva(@addr)
-				sig = coff.curencoded.read(4)
-				case sig
-				when 'NB09'	# CodeView 4.10
-				when 'NB10'	# external pdb2.0
-					@data = NB10.decode(coff)
-				when 'NB11'	# CodeView 5.0
-				when 'RSDS'	# external pdb7.0
-					@data = RSDS.decode(coff)
-				end
-			end
-		end
-	end
 
 	attr_accessor :cursection
-	def curencoded
-		@cursection.encoded
-	end
 
-	def decode_byte( edata = curencoded) ; edata.decode_imm(:u8,  @endianness) end
-	def decode_half( edata = curencoded) ; edata.decode_imm(:u16, @endianness) end
-	def decode_word( edata = curencoded) ; edata.decode_imm(:u32, @endianness) end
-	def decode_xword(edata = curencoded) ; edata.decode_imm((@bitsize == 32 ? :u32 : :u64), @endianness) end
-	def decode_strz( edata = curencoded) ; super(edata) ; end
+	def decode_byte( edata = @cursection.encoded) ; edata.decode_imm(:u8,  @endianness) end
+	def decode_half( edata = @cursection.encoded) ; edata.decode_imm(:u16, @endianness) end
+	def decode_word( edata = @cursection.encoded) ; edata.decode_imm(:u32, @endianness) end
+	def decode_xword(edata = @cursection.encoded) ; edata.decode_imm((@optheader.signature == 'PE+' ? :u64 : :u32), @endianness) end
+	def decode_strz( edata = @cursection.encoded) ; super(edata) ; end
 
 	# converts an RVA (offset from base address of file when loaded in memory) to the section containing it using the section table
 	# updates @cursection and @cursection.encoded.ptr to point to the specified address
@@ -430,7 +375,8 @@ class COFF
 	def sect_at_rva(rva)
 		return if not rva or rva <= 0
 		if sections and not @sections.empty?
-			if s = @sections.find { |s_| s_.virtaddr <= rva and s_.virtaddr + EncodedData.align_size((s_.virtsize == 0 ? s_.rawsize : s_.virtsize), @optheader.sect_align) > rva }
+			valign = lambda { |l| EncodedData.align_size(l, @optheader.sect_align) }
+			if s = @sections.find { |s_| s_.virtaddr <= rva and s_.virtaddr + valign[s_.virtsize] > rva }
 				s.encoded.ptr = rva - s.virtaddr
 				@cursection = s
 			elsif rva < @sections.map { |s_| s_.virtaddr }.min
@@ -482,7 +428,7 @@ class COFF
 	end
 
 	def each_section
-		if @header.size_opthdr == 0 and not @header.characteristics.include?('EXECUTABLE_IMAGE')
+		if @header.size_opthdr == 0
 			@sections.each { |s|
 				next if not s.encoded
 				l = new_label(s.name)
@@ -493,9 +439,7 @@ class COFF
 		end
 		base = @optheader.image_base
 		base = 0 if not base.kind_of? Integer
-		sz = @optheader.headers_size
-		sz = EncodedData.align_size(@optheader.image_size, 4096) if @sections.empty?
-		yield @encoded[0, sz], base
+		yield @encoded[0, @optheader.headers_size], base
 		@sections.each { |s| yield s.encoded, base + s.virtaddr }
 	end
 
@@ -509,14 +453,14 @@ class COFF
 		optoff = @encoded.ptr
 		@optheader.decode(self)
 		decode_symbols if @header.num_sym != 0 and not @header.characteristics.include? 'DEBUG_STRIPPED'
-		curencoded.ptr = optoff + @header.size_opthdr
+		@cursection.encoded.ptr = optoff + @header.size_opthdr
 		decode_sections
 		if sect_at_rva(@optheader.entrypoint)
-			curencoded.add_export new_label('entrypoint')
+			@cursection.encoded.add_export new_label('entrypoint')
 		end
 		(DIRECTORIES - ['certificate_table']).each { |d|
 			if @directory[d] and sect_at_rva(@directory[d][0])
-				curencoded.add_export new_label(d)
+				@cursection.encoded.add_export new_label(d)
 			end
 		}
 	end
@@ -545,7 +489,7 @@ class COFF
 		# now decode COFF object relocations
 		@sections.each { |s|
 			next if s.relocnr == 0
-			curencoded.ptr = s.relocaddr
+			@cursection.encoded.ptr = s.relocaddr
 			s.relocs = []
 			s.relocnr.times { s.relocs << RelocObj.decode(self) }
 			new_label 'pcrel'
@@ -571,10 +515,8 @@ class COFF
 	# decodes a section content (allows simpler LoadedPE override)
 	def decode_section_body(s)
 		raw = EncodedData.align_size(s.rawsize, @optheader.file_align)
-		virt = s.virtsize
+		virt = EncodedData.align_size(s.virtsize, @optheader.sect_align)
 		virt = raw = s.rawsize if @header.size_opthdr == 0
-		virt = raw if virt == 0
-		virt = EncodedData.align_size(virt, @optheader.sect_align)
 		s.encoded = @encoded[s.rawaddr, [raw, virt].min] || EncodedData.new
 		s.encoded.virtsize = virt
 	end
@@ -590,7 +532,7 @@ class COFF
 				elsif e.ordinal and sect_at_rva(e.target)
 					name = "ord_#{@export.libname}_#{e.ordinal}"
 				end
-				e.target = curencoded.add_export new_label(name) if name
+				e.target = @cursection.encoded.add_export new_label(name) if name
 			}
 		end
 	end
@@ -600,10 +542,10 @@ class COFF
 	def decode_imports
 		if @directory['import_table'] and sect_at_rva(@directory['import_table'][0])
 			@imports = ImportDirectory.decode_all(self)
-			iatlen = @bitsize/8
+			iatlen = (@optheader.signature == 'PE+' ? 8 : 4)
 			@imports.each { |id|
 				if sect_at_rva(id.iat_p)
-					ptr = curencoded.ptr
+					ptr = @cursection.encoded.ptr
 					id.imports.each { |i|
 						if i.name
 							name = new_label i.name
@@ -612,9 +554,9 @@ class COFF
 						end
 						if name
 							i.target ||= name
-							r = Metasm::Relocation.new(Expression[name], "u#@bitsize".to_sym, @endianness)
-							curencoded.reloc[ptr] = r
-							curencoded.add_export new_label('iat_'+name), ptr, true
+							r = Metasm::Relocation.new(Expression[name], :u32, @endianness)
+							@cursection.encoded.reloc[ptr] = r
+							@cursection.encoded.add_export new_label('iat_'+name), ptr, true
 						end
 						ptr += iatlen
 					}
@@ -653,23 +595,12 @@ class COFF
 		end
 	end
 
-	# decode the COM Cor20 header
-	def decode_com
-		if @directory['com_runtime'] and sect_at_rva(@directory['com_runtime'][0])
-			@com_header = Cor20Header.decode(self)
-			if sect_at_rva(@com_header.entrypoint)
-				curencoded.add_export new_label('com_entrypoint')
-			end
-			@com_header.decode_all(self)
-		end
-	end
-
 	# decode COFF relocation tables from directory
 	def decode_relocs
 		if @directory['base_relocation_table'] and sect_at_rva(@directory['base_relocation_table'][0])
-			end_ptr = curencoded.ptr + @directory['base_relocation_table'][1]
+			end_ptr = @cursection.encoded.ptr + @directory['base_relocation_table'][1]
 			@relocations = []
-			while curencoded.ptr < end_ptr
+			while @cursection.encoded.ptr < end_ptr
 				@relocations << RelocationTable.decode(self)
 			end
 
@@ -713,12 +644,7 @@ class COFF
 
 	def decode_debug
 		if dd = @directory['debug'] and sect_at_rva(dd[0])
-			@debug = []
-			p0 = curencoded.ptr
-			while curencoded.ptr < p0 + dd[1]
-				@debug << DebugDirectory.decode(self)
-			end
-			@debug.each { |dbg| dbg.decode_inner(self) }
+			@debug = DebugDirectory.decode(self)
 		end
 	end
 
@@ -729,7 +655,7 @@ class COFF
 		       	if s = sect_at_va(@tls.callback_p)
 				s.encoded.add_export 'tls_callback_table'
 				@tls.callbacks.each_with_index { |cb, i|
-					@tls.callbacks[i] = curencoded.add_export "tls_callback_#{i}" if sect_at_rva(cb)
+					@tls.callbacks[i] = @cursection.encoded.add_export "tls_callback_#{i}" if sect_at_rva(cb)
 			       	}
 			end
 		end
@@ -760,7 +686,6 @@ class COFF
 		decode_tls
 		decode_loadconfig
 		decode_delayimports
-		decode_com
 		decode_relocs unless nodecode_relocs or ENV['METASM_NODECODE_RELOCS']	# decode relocs last
 	end
 

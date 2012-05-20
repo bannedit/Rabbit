@@ -32,9 +32,8 @@ module Metasm
 
 	# files to require to get the definition of those constants
 	Const_autorequire = {
-		'Ia32' => 'cpu/ia32', 'MIPS' => 'cpu/mips', 'PowerPC' => 'cpu/ppc', 'ARM' => 'cpu/arm',
-		'X86_64' => 'cpu/x86_64', 'Sh4' => 'cpu/sh4', 'Dalvik' => 'cpu/dalvik', 'ARC' => 'cpu/arc',
-		'Python' => 'cpu/python', 'Z80' => 'cpu/z80', 'CY16' => 'cpu/cy16',
+		'Ia32' => 'ia32', 'MIPS' => 'mips', 'PowerPC' => 'ppc', 'ARM' => 'arm',
+		'X86_64' => 'x86_64', 'Sh4' => 'sh4', 'Dalvik' => 'dalvik',
 		'C' => 'compile_c',
 		'MZ' => 'exe_format/mz', 'PE' => 'exe_format/pe',
 		'ELF' => 'exe_format/elf', 'COFF' => 'exe_format/coff',
@@ -42,15 +41,10 @@ module Metasm
 		'AOut' => 'exe_format/a_out', 'MachO' => 'exe_format/macho',
 		'DEX' => 'exe_format/dex',
 		'NDS' => 'exe_format/nds', 'XCoff' => 'exe_format/xcoff',
-		'GameBoyRom' => 'exe_format/gb',
 		'Bflt' => 'exe_format/bflt', 'Dol' => 'exe_format/dol',
-		'PYC' => 'exe_format/pyc', 'JavaClass' => 'exe_format/javaclass',
-		'SWF' => 'exe_format/swf',
-		'Shellcode_RWX' => 'exe_format/shellcode_rwx',
 		'Gui' => 'gui',
 		'WindowsExports' => 'os/windows_exports',
 		'GNUExports' => 'os/gnu_exports',
-		'Debugger' => 'debug',
 		'LinOS' => 'os/linux', 'WinOS' => 'os/windows',
 		'GdbClient' => 'os/remote',
 		'Disassembler' => 'disassemble',

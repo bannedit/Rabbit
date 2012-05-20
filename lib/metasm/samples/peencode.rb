@@ -6,14 +6,15 @@
 #    Licence is LGPL, see LICENCE in the top-level directory
 
 require 'metasm'
-$opts = { :execlass => Metasm::PE, :srctype_data => 'c' }
+$opts = { :execlass => Metasm::PE }
+$opts[:srctype] = 'c' if ARGV.empty?
 load File.join(File.dirname(__FILE__), 'exeencode.rb')
 
 __END__
-__stdcall int MessageBox(int, char*, char*, int);
-__stdcall void ExitProcess(int);
+int MessageBoxA(int, char*, char*, int);
+void ExitProcess(int);
 void main(void)
 {
-	MessageBox(0, "kikoo", "lol", 0);
+	MessageBoxA(0, "kikoo", "lol", 0);
 	ExitProcess(0);
 }

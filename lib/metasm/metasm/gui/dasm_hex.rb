@@ -47,7 +47,7 @@ class HexWidget < DrawableWidget
 			  :write_pending => :darkred, :caret_mirror => :palegrey }
 	end
 
-	def resized(w=width, h=height)
+	def resized(w, h)
 		wc = w/@font_width
 		hc = h/@font_height
 		ca = current_address
@@ -103,7 +103,6 @@ class HexWidget < DrawableWidget
 			end
 		else
 			@data_size = {1 => 2, 2 => 4, 4 => 8, 8 => 1}[@data_size]
-			resized
 		end
 		redraw
 	end
@@ -395,7 +394,7 @@ class HexWidget < DrawableWidget
 	def prompt_search_hex
 		inputbox('hex pattern to search (hex regexp, use .. for wildcard)') { |pat|
 			pat = pat.gsub(' ', '').gsub('..', '.').gsub(/[0-9a-f][0-9a-f]/i) { |o| "\\x#{o}" }
-			pat = Regexp.new(pat, Regexp::MULTILINE, 'n')	# 'n' = force ascii-8bit
+			pat = Regexp.new(pat, Regexp::MULTILINE)
 			list = [['addr']] + @dasm.pattern_scan(pat).map { |a| [Expression[a]] }
 			listwindow("hex search #{pat}", list) { |i| focus_addr i[0] }
 		}

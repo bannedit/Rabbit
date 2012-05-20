@@ -134,10 +134,7 @@ class ExeFormat
 	def init_disassembler
 		@disassembler ||= Disassembler.new(self)
 		@disassembler.cpu ||= cpu
-		each_section { |edata, base|
-			edata ||= EncodedData.new
-			@disassembler.add_section edata, base
-		}
+		each_section { |edata, base| @disassembler.add_section edata, base }
 		@disassembler
 	end
 
@@ -155,7 +152,7 @@ class ExeFormat
 	# initializes the disassembler if needed
 	# uses get_default_entrypoints if the argument list is empty
 	# returns the disassembler
-	def disassemble_fast_deep(*entrypoints)
+	def disassemble_fast(*entrypoints)
 		entrypoints = get_default_entrypoints if entrypoints.empty?
 		disassembler.disassemble_fast_deep(*entrypoints)
 		@disassembler

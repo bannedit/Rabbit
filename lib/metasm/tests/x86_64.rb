@@ -59,28 +59,4 @@ class TestX86_64 < Test::Unit::TestCase
 		assert_equal('r12b', op["\x41\xfe\xc4"])
 		assert_equal('[rip-6+12h]', op["\x8d\x05\x0c\0\0\0"])
 	end
-
-	def test_opsz
-		assert_equal("\x66\x98", assemble("cbw"))
-		assert_equal("\x98", assemble("cwde"))
-		assert_equal("\x48\x98", assemble("cdqe"))
-
-		assert_equal("\x0f\xc7\x08", assemble("cmpxchg8b [rax]"))
-		assert_equal("\x48\x0f\xc7\x08", assemble("cmpxchg16b [rax]"))
-
-		assert_equal(nil, disassemble("\x66\x0f\xc7\x08").decoded[0])
-		assert_equal('cmpxchg8b', disassemble("\x47\x0f\xc7\x08").decoded[0].opcode.name)
-		assert_equal('cmpxchg16b', disassemble("\x48\x0f\xc7\x08").decoded[0].opcode.name)
-	end
-
-	def test_avx
-		assert_equal('vmpsadbw ymm12, ymm14, ymm2, 3', disassemble("\xc4\x63\x0d\x42\xe2\x03").decoded[0].instruction.to_s)
-		assert_equal("\xc4\x63\x0d\x42\xe2\x03", assemble('vmpsadbw ymm12, ymm14, ymm2, 3'))
-		assert_equal("\xc5\x31\x63\xc2", assemble('vpacksswb xmm8, xmm9, xmm2'))
-		assert_equal("\xc4\x41\x31\x63\xc2", assemble('vpacksswb xmm8, xmm9, xmm10'))
-		assert_equal("\xc5\x31\x63\x04\x5a", assemble('vpacksswb xmm8, xmm9, [rdx+2*rbx]'))
-		assert_equal("\xc4\x01\x31\x63\x04\x5a", assemble('vpacksswb xmm8, xmm9, [r10+2*r11]'))
-		assert_equal("\xc4\x22\x99\x92\x14\x1a", assemble('vgatherdpd xmm10, qword ptr [rdx+xmm11], xmm12'))
-		assert_equal('vgatherdpd xmm10, qword ptr [rdx+xmm11], xmm12', disassemble("\xc4\x22\x99\x92\x14\x1a").decoded[0].instruction.to_s)
-	end
 end

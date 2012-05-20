@@ -40,7 +40,7 @@ OptionParser.new { |opt|
 	opt.on('--map <mapfile>', 'load a map file (addr <-> name association)') { |f| opts[:map] = f }
 	opt.on('--fast', 'dasm cli args with disassemble_fast_deep') { opts[:fast] = true }
 	opt.on('--decompile') { opts[:decompile] = true }
-	opt.on('--gui <gtk|win32|qt>') { |g| ENV['METASM_GUI'] = g }
+	opt.on('--gui <gtk|win32|qt>') { |g| require 'metasm/gui/' + g }
 	opt.on('--cpu <cpu>', 'the CPU class to use for a shellcode (Ia32, X64, ...)') { |c| opts[:sc_cpu] = c }
 	opt.on('--exe <exe_fmt>', 'the executable file format to use (PE, ELF, ...)') { |c| opts[:exe_fmt] = c }
 	opt.on('--rebase <addr>', 'rebase the loaded file to <addr>') { |a| opts[:rebase] = Integer(a) }
@@ -80,7 +80,7 @@ end
 ep = ARGV.map { |arg| (?0..?9).include?(arg[0]) ? Integer(arg) : arg }
 
 if exe
-	dasm = exe.disassembler
+	dasm = exe.init_disassembler
 
 	dasm.load_map opts[:map] if opts[:map]
 	dasm.parse_c_file opts[:cheader] if opts[:cheader]

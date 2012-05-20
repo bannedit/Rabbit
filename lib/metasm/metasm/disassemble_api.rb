@@ -118,13 +118,6 @@ class Disassembler
 	def self.backtrace_maxblocks ; @@backtrace_maxblocks ; end
 	def self.backtrace_maxblocks=(b) ; @@backtrace_maxblocks = b ; end
 
-	# adds a commentary at the given address
-	# comments are found in the array @comment: {addr => [list of strings]}
-	def add_comment(addr, cmt)
-		@comment[addr] ||= []
-		@comment[addr] |= [cmt]
-	end
-
 	# returns the dasm section's edata containing addr
 	# its #ptr points to addr
 	# returns the 1st element of #get_section_at
@@ -187,12 +180,6 @@ class Disassembler
 		}
 		ret
 	end
-	alias instructionblocks each_instructionblock
-
-	# return a backtrace_binding reversed (akin to code emulation) (but not really)
-	def get_fwdemu_binding(di, pc=nil)
-		@cpu.get_fwdemu_binding(di, pc)
-	end
 
 	# reads len raw bytes from the mmaped address space
 	def read_raw_data(addr, len)
@@ -247,17 +234,6 @@ class Disassembler
 		if e = get_section_at(addr)
 			@cpu.decode_instruction(e[0], normalize(addr))
 		end
-	end
-
-	# disassemble addr as if the code flow came from from_addr
-	def disassemble_from(addr, from_addr)
-		from_addr = from_addr.address if from_addr.kind_of? DecodedInstruction
-		from_addr = normalize(from_addr)
-		if b = block_at(from_addr)
-			b.add_to_normal(addr)
-		end
-		@addrs_todo << [addr, from_addr]
-		disassemble
 	end
 
 	# returns the label associated to an addr, or nil if none exist
@@ -689,23 +665,17 @@ class Disassembler
 	end
 
 	# returns a demangled C++ name
-	def demangle_cppname(name)
-		case name[0]
-		when ??	# MSVC
-			name = name[1..-1]
-			demangle_msvc(name[1..-1]) if name[0] == ??
-		when ?_
-			name = name.sub(/_GLOBAL__[ID]_/, '')
-			demangle_gcc(name[2..-1][/\S*/]) if name[0, 2] == '_Z'
-		end
-	end
-
 	# from wgcc-2.2.2/undecorate.cpp
 	# TODO
-	def demangle_msvc(name)
-		op = name[0, 1]
-		op = name[0, 2] if op == '_'
-		if op = {
+	def demangle_cppname(name)
+		ret = name
+		if name[0] == ??
+			name = name[1..-1]
+			if name[0] == ??
+				name = name[1..-1]
+				op = name[0, 1]
+				op = name[0, 2] if op == '_'
+				if op = {
 	'2' => "new", '3' => "delete", '4' => "=", '5' => ">>", '6' => "<<", '7' => "!", '8' => "==", '9' => "!=",
 	'A' => "[]", 'C' => "->", 'D' => "*", 'E' => "++", 'F' => "--", 'G' => "-", 'H' => "+", 'I' => "&",
 	'J' => "->*", 'K' => "/", 'L' => "%", 'M' => "<", 'N' => "<=", 'O' => ">", 'P' => ">=", 'Q' => ",",
@@ -718,157 +688,11 @@ class Disassembler
 	'_M' => "`eh vector destructor iterator'", '_N' => "`eh vector vbase constructor iterator'", '_O' => "`copy constructor closure'",
 	'_S' => "`local vftable'", '_T' => "`local vftable constructor closure'", '_U' => "new[]", '_V' => "delete[]",
 	'_X' => "`placement delete closure'", '_Y' => "`placement delete[] closure'"}[op]
-			op[0] == ?` ? op[1..-2] : "op_#{op}"
-		end
-	end
-
-	# from http://www.codesourcery.com/public/cxx-abi/abi.html
-	def demangle_gcc(name)
-		subs = []
-		ret = ''
-		decode_tok = lambda {
-			name ||= ''
-			case name[0]
-			when nil
-				ret = nil
-			when ?N
-				name = name[1..-1]
-				decode_tok[]
-				until name[0] == ?E
-					break if not ret
-					ret << '::'
-					decode_tok[]
-				end
-				name = name[1..-1]
-			when ?I
-				name = name[1..-1]
-				ret = ret[0..-3] if ret[-2, 2] == '::'
-				ret << '<'
-				decode_tok[]
-				until name[0] == ?E
-					break if not ret
-					ret << ', '
-					decode_tok[]
-				end
-				ret << ' ' if ret and ret[-1] == ?>
-				ret << '>' if ret
-				name = name[1..-1]
-			when ?T
-				case name[1]
-				when ?T; ret << 'vtti('
-				when ?V; ret << 'vtable('
-				when ?I; ret << 'typeinfo('
-				when ?S; ret << 'typename('
-				else ret = nil
-				end
-				name = name[2..-1].to_s
-				decode_tok[] if ret
-				ret << ')' if ret
-				name = name[1..-1] if name[0] == ?E
-			when ?C
-				name = name[2..-1]
-				base = ret[/([^:]*)(<.*|::)?$/, 1]
-				ret << base
-			when ?D
-				name = name[2..-1]
-				base = ret[/([^:]*)(<.*|::)?$/, 1]
-				ret << '~' << base
-			when ?0..?9
-				nr = name[/^[0-9]+/]
-				name = name[nr.length..-1].to_s
-				ret << name[0, nr.to_i]
-				name = name[nr.to_i..-1]
-				subs << ret[/[\w:]*$/]
-			when ?S
-				name = name[1..-1]
-				case name[0]
-				when ?_, ?0..?9, ?A..?Z
-					case name[0]
-					when ?_; idx = 0 ; name = name[1..-1]
-					when ?0..?9; idx = name[0, 1].unpack('C')[0] - 0x30 + 1 ; name = name[2..-1]
-					when ?A..?Z; idx = name[0, 1].unpack('C')[0] - 0x41 + 11 ; name = name[2..-1]
-					end
-					if not subs[idx]
-						ret = nil
-					else
-						ret << subs[idx]
-					end
-				when ?t
-					ret << 'std::'
-					name = name[1..-1]
-					decode_tok[]
-				else
-					std = { ?a => 'std::allocator',
-						?b => 'std::basic_string',
-						?s => 'std::basic_string < char, std::char_traits<char>, std::allocator<char> >',
-						?i => 'std::basic_istream<char,  std::char_traits<char> >',
-						?o => 'std::basic_ostream<char,  std::char_traits<char> >',
-						?d => 'std::basic_iostream<char, std::char_traits<char> >'
-					}[name[0]]
-					if not std
-						ret = nil
-					else
-						ret << std
-					end
-					name = name[1..-1]
-				end
-			when ?P, ?R, ?r, ?V, ?K
-				attr = { ?P => '*', ?R => '&', ?r => ' restrict', ?V => ' volatile', ?K => ' const' }[name[0]]
-				name = name[1..-1]
-				rl = ret.length
-				decode_tok[]
-				if ret
-					ret << attr
-					subs << ret[rl..-1]
-				end
-			else
-				if ret =~ /[(<]/ and ty = {
-			?v => 'void', ?w => 'wchar_t', ?b => 'bool', ?c => 'char', ?a => 'signed char',
-			?h => 'unsigned char', ?s => 'short', ?t => 'unsigned short', ?i => 'int',
-			?j => 'unsigned int', ?l => 'long', ?m => 'unsigned long', ?x => '__int64',
-			?y => 'unsigned __int64', ?n => '__int128', ?o => 'unsigned __int128', ?f => 'float',
-			?d => 'double', ?e => 'long double', ?g => '__float128', ?z => '...'
-				}[name[0]]
-					name = name[1..-1]
-					ret << ty
-				else
-					fu = name[0, 2]
-					name = name[2..-1]
-					if op = {
-			'nw' => ' new', 'na' => ' new[]', 'dl' => ' delete', 'da' => ' delete[]',
-			'ps' => '+', 'ng' => '-', 'ad' => '&', 'de' => '*', 'co' => '~', 'pl' => '+',
-			'mi' => '-', 'ml' => '*', 'dv' => '/', 'rm' => '%', 'an' => '&', 'or' => '|',
-			'eo' => '^', 'aS' => '=', 'pL' => '+=', 'mI' => '-=', 'mL' => '*=', 'dV' => '/=',
-			'rM' => '%=', 'aN' => '&=', 'oR' => '|=', 'eO' => '^=', 'ls' => '<<', 'rs' => '>>',
-			'lS' => '<<=', 'rS' => '>>=', 'eq' => '==', 'ne' => '!=', 'lt' => '<', 'gt' => '>',
-			'le' => '<=', 'ge' => '>=', 'nt' => '!', 'aa' => '&&', 'oo' => '||', 'pp' => '++',
-			'mm' => '--', 'cm' => ',', 'pm' => '->*', 'pt' => '->', 'cl' => '()', 'ix' => '[]',
-			'qu' => '?', 'st' => ' sizeof', 'sz' => ' sizeof', 'at' => ' alignof', 'az' => ' alignof'
-					}[fu]
-						ret << "operator#{op}"
-					elsif fu == 'cv'
-						ret << "cast<"
-						decode_tok[]
-						ret << ">" if ret
-					else
-						ret = nil
-					end
+					ret = op[0] == ?` ? op[1..-2] : "op_#{op}"
 				end
 			end
-			name ||= ''
-		}
-
-		decode_tok[]
-		subs.pop
-		if ret and name != ''
-			ret << '('
-			decode_tok[]
-			while ret and name != ''
-				ret << ', '
-				decode_tok[]
-			end
-			ret << ')' if ret
 		end
+		# TODO
 		ret
 	end
 
@@ -876,8 +700,7 @@ class Disassembler
 	# return/yields all the addresses matching
 	# if yield returns nil/false, do not include the addr in the final result
 	# sections are scanned MB by MB, so this should work (slowly) on 4GB sections (eg debugger VM)
-	# with addr_start/length, symbol-based section are skipped
-	def pattern_scan(pat, addr_start=nil, length=nil, chunksz=nil, margin=nil)
+	def pattern_scan(pat, chunksz=nil, margin=nil)
 		chunksz ||= 4*1024*1024	# scan 4MB at a time
 		margin ||= 65536	# add this much bytes at each chunk to find /pat/ over chunk boundaries
 
@@ -885,22 +708,6 @@ class Disassembler
 
 		found = []
 		@sections.each { |sec_addr, e|
-			if addr_start
-				begin
-					if sec_addr < addr_start
-						next if sec_addr+e.length <= addr_start
-						e = e[addr_start-sec_addr, e.length]
-						sec_addr = addr_start
-					end
-					if sec_addr+e.length > addr_start+length
-						next if sec_addr > addr_start+length
-						e = e[0, sec_addr+e.length-(addr_start+length)]
-					end
-				rescue
-					# catch arithmetic error with symbol-based section
-					next
-				end
-			end
 			e.pattern_scan(pat, chunksz, margin) { |eo|
 				match_addr = sec_addr + eo
 				found << match_addr if not block_given? or yield(match_addr)
@@ -968,14 +775,13 @@ class Disassembler
 	def save_io(fd)
 		fd.puts 'Metasm.dasm'
 
-		if @program.filename and not @program.kind_of?(Shellcode)
+		if @program.filename
 			t = @program.filename.to_s
 			fd.puts "binarypath #{t.length}", t
 		else
 			t = "#{@cpu.class.name.sub(/.*::/, '')} #{@cpu.size} #{@cpu.endianness}"
 			fd.puts "cpu #{t.length}", t
 			# XXX will be reloaded as a Shellcode with this CPU, but it may be a custom EXE
-			# do not output binarypath, we'll be loaded as a Shellcode, 'section' will suffice
 		end
 
 		@sections.each { |a, e|
@@ -1081,7 +887,6 @@ class Disassembler
 				reinitialize Shellcode.new(cpu)
 				@program.disassembler = self
 				@program.init_disassembler
-				@sections.delete(0)	# rm empty section at 0, other real 'section' follow
 			when 'section'
 				info = data[0, data.index("\n") || data.length]
 				data = data[info.length, data.length]
@@ -1244,61 +1049,12 @@ class Disassembler
 		delta
 	end
 
-	# change Expressions in the instruction args to display <somestruct>.<somemember>
-	def patch_structoffset(di, stname, off=nil)
-		tge = nil
-		di.each_expr { |e|
-			if e.kind_of?(Expression) and e.op == :+
-				if e.rexpr.kind_of? Integer and (not off or off == e.rexpr)
-					tge = e
-				elsif e.rexpr.kind_of? ExpressionString and (not off or off == e.rexpr.reduce)
-					tge = e
-				end
-			end
-		}
-		raise 'cant find offset' if not tge
-		if not stname
-			# replace str.mem by the original offset
-			tge.rexpr = Expression[tge.rexpr].reduce
-		else
-			st = c_parser.toplevel.struct[stname]
-			stm = st.findmember_atoffset(c_parser, off)
-			tge.rexpr = ExpressionStringStructoff.new(tge.rexpr, st, stm)
-		end
-	end
-
 	# change Expression display mode for current object o to display integers as char constants
 	def toggle_expr_char(o)
-		return if not o.kind_of?(Renderable)
-		tochars = lambda { |v|
-			if v.kind_of?(::Integer)
-				a = []
-				vv = v.abs
-				a << (vv & 0xff)
-				vv >>= 8
-				while vv > 0
-					a << (vv & 0xff)
-					vv >>= 8
-				end
-				if a.all? { |b| b < 0x7f }
-					s = a.pack('C*').inspect.gsub("'") { '\\\'' }[1...-1]
-					ExpressionString.new(v, (v > 0 ? "'#{s}'" : "-'#{s}'"), :char)
-				end
-			end
-		}
+		return if not o.kind_of? Renderable
 		o.each_expr { |e|
-			if e.kind_of?(Expression)
-				if nr = tochars[e.rexpr]
-					e.rexpr = nr
-				elsif e.rexpr.kind_of?(ExpressionString) and e.rexpr.type == :char
-					e.rexpr = e.rexpr.expr
-				end
-				if nl = tochars[e.lexpr]
-					e.lexpr = nl
-				elsif e.lexpr.kind_of?(ExpressionString) and e.lexpr.type == :char
-					e.lexpr = e.lexpr.expr
-				end
-			end
+			e.render_info ||= {}
+			e.render_info[:char] = e.render_info[:char] ? nil : @cpu.endianness
 		}
 	end
 
@@ -1464,24 +1220,6 @@ class Disassembler
 		}
 
 		bd
-	end
-
-	def gui_hilight_word_regexp(word)
-		@cpu.gui_hilight_word_regexp(word)
-	end
-
-	# return a C::AllocCStruct from c_parser
-	# TODO handle program.class::Header.to_c_struct
-	def decode_c_struct(structname, addr)
-		if c_parser and edata = get_edata_at(addr)
-			c_parser.decode_c_struct(structname, edata.data, edata.ptr)
-		end
-	end
-
-	def decode_c_ary(structname, addr, len)
-		if c_parser and edata = get_edata_at(addr)
-			c_parser.decode_c_ary(structname, len, edata.data, edata.ptr)
-		end
 	end
 end
 end

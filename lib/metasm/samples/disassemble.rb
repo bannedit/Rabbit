@@ -62,7 +62,7 @@ else
 	end
 end
 # set options
-dasm = exe.disassembler
+dasm = exe.init_disassembler
 makeint = lambda { |addr|
 	case addr
 	when /^[0-9].*h/; addr.to_i(16)
@@ -81,7 +81,7 @@ opts[:hookstr].to_a.each { |f| eval f }
 t1 = Time.now if opts[:benchmark]
 # do the work
 begin
-	method = opts[:fast] ? :disassemble_fast_deep : :disassemble
+	method = opts[:fast] ? :disassemble_fast : :disassemble
 	if ARGV.empty?
 		exe.send(method)
 	else

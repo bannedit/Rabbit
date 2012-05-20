@@ -1,4 +1,4 @@
-
+# Quick and agile debugging ;]
 require 'lib/metasm/metasm'
 
 module Rabbit
@@ -51,6 +51,45 @@ module Rabbit
 		end
 
 		def handler_exception(pid, tid, info)
+			ctx = get_context(pid, tid)
+			regs = "eax: %08x ebx: %08x ecx: %08x edx: %08x esi: %08x edi: %08x\neip: %08x esp: %08x ebp: %08x" % 
+				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp]]
+
+			exe = Metasm::ExeFormat.new(Metasm::Ia32.new)
+			disasm = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip] )
+
+			case info.code
+			when WinAPI::STATUS_ACCESS_VIOLATION
+				status = "Access violation exception - #{info.code} "
+				if info.nparam >= 1
+					case info.info[0]
+					when 0
+						status << "- Read Operation"
+					when 1
+						status << "- Write Operation"
+					when 8
+						status << "- Execute Operation"
+					end
+				end
+
+				puts regs
+				puts disasm
+				WinAPI::DBG_EXCEPTION_NOT_HANDLED
+
+			when WinAPI::STATUS_BREAKPOINT
+				status = "Break instruction exception - #{info.code} "
+				puts regs
+				puts disasm
+				WinAPI::DBG_CONTINUE
+
+			when WinAPI::STATUS_SINGLE_STEP
+				# not yet implemented
+				WinAPI::DBG_CONTINUE
+
+			else
+				# not yet implemented
+				WinAPI::DBG_EXCEPTION_NOT_HANDLED
+			end
 		end
 
 		def handler_loaddll(pid, tid, info)
@@ -63,12 +102,6 @@ module Rabbit
 			puts "#{pid}:#{tid} process died"
 			prehandler_endprocess(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
-		end
-
-		def prehandler_endprocess(pid, tid, info)
-			@hprocess.delete pid
-			@hthread.delete pid
-			@mem.delete pid
 		end
 
 	end

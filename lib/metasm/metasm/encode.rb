@@ -186,8 +186,7 @@ class ExeFormat
 				wantsize = {}
 
 				elem.each { |e|
-					e.reloc.sort.each_with_index { |r_, i|
-						r = r_[1]
+					e.reloc.sort.each_with_index { |(o, r), i|
 						# has external ref
 						if not r.target.bind(minbinding).reduce.kind_of?(Numeric) or not check_linear[r.target]
 							# find the biggest relocation type for the current target
@@ -271,15 +270,7 @@ class Expression
 	def encode(type, endianness, backtrace=nil)
 		case val = reduce
 		when Integer; EncodedData.new Expression.encode_imm(val, type, endianness, backtrace)
-		else
-			str = case INT_SIZE[type]
-			      when  8; "\0"
-			      when 16; "\0\0"
-			      when 32; "\0\0\0\0"
-			      when 64; "\0\0\0\0\0\0\0\0"
-			      else [0].pack('C')*(INT_SIZE[type]/8)
-			      end
-	       		EncodedData.new(str, :reloc => {0 => Relocation.new(self, type, endianness, backtrace)})
+		else          EncodedData.new([0].pack('C')*(INT_SIZE[type]/8), :reloc => {0 => Relocation.new(self, type, endianness, backtrace)})
 		end
 	end
 

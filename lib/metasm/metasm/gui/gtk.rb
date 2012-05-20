@@ -153,7 +153,7 @@ class DrawableWidget < Gtk::DrawingArea
 	# keypress event keyval traduction table
 	Keyboard_trad = Gdk::Keyval.constants.grep(/^GDK_/).inject({}) { |h, cst|
 		v = Gdk::Keyval.const_get(cst)
-		key = cst.to_s.sub(/^GDK_/, '').sub(/^KEY_/, '').sub(/^KP_/, '')
+		key = cst.to_s.sub(/^GDK_/, '').sub(/^KP_/, '')
 		if key.length == 1
 			key = key[0]	# ?a, ?b etc
 		else
@@ -161,7 +161,7 @@ class DrawableWidget < Gtk::DrawingArea
 			key = {
 			:page_up => :pgup, :page_down => :pgdown, :next => :pgdown,
 			:escape => :esc, :return => :enter, :l1 => :f11, :l2 => :f12,
-			:prior => :pgup, :menu => :popupmenu,
+			:prior => :pgup,
 
 			:space => ?\ ,
 			:asciitilde => ?~, :quoteleft => ?`,
@@ -188,12 +188,6 @@ class DrawableWidget < Gtk::DrawingArea
 
 		h.update v => key
 	}
-
-	BasicColor = {	:white => 'fff', :palegrey => 'ddd', :black => '000', :grey => '444',
-			:red => 'f00', :darkred => '800', :palered => 'fcc',
-			:green => '0f0', :darkgreen => '080', :palegreen => 'cfc',
-			:blue => '00f', :darkblue => '008', :paleblue => 'ccf',
-			:yellow => 'ff0', :darkyellow => '440', :paleyellow => 'ffc' }
 
 	def initialize(*a, &b)
 		@parent_widget = nil
@@ -222,8 +216,7 @@ class DrawableWidget < Gtk::DrawingArea
 		}
 
 		signal_connect('button_press_event') { |w, ev|
-			@last_kb_ev = ev
-			if keyboard_state(:control)
+			if ev.state & Gdk::Window::CONTROL_MASK == Gdk::Window::CONTROL_MASK
 				next protect { click_ctrl(ev.x, ev.y) } if ev.event_type == Gdk::Event::Type::BUTTON_PRESS and ev.button == 1 and respond_to? :click_ctrl
 				next
 			end
@@ -232,6 +225,7 @@ class DrawableWidget < Gtk::DrawingArea
 				grab_focus
 				case ev.button
 				when 1; protect { click(ev.x, ev.y) } if respond_to? :click
+				when 3; protect { rightclick(ev.x, ev.y) } if respond_to? :rightclick
 				end
 			when Gdk::Event::Type::BUTTON2_PRESS
 				case ev.button
@@ -241,8 +235,7 @@ class DrawableWidget < Gtk::DrawingArea
 		}
 
 		signal_connect('motion_notify_event') { |w, ev|
-			@last_kb_ev = ev
-			if keyboard_state(:control)
+			if ev.state & Gdk::Window::CONTROL_MASK == Gdk::Window::CONTROL_MASK
 				protect { mousemove_ctrl(ev.x, ev.y) } if respond_to? :mousemove_ctrl
 			else
 				protect { mousemove(ev.x, ev.y) }
@@ -250,11 +243,8 @@ class DrawableWidget < Gtk::DrawingArea
 		} if respond_to? :mousemove
 
 		signal_connect('button_release_event') { |w, ev|
-			case ev.button
-			when 1; protect { mouserelease(ev.x, ev.y) } if respond_to? :mouserelease
-			when 3; protect { rightclick(ev.x, ev.y) } if respond_to? :rightclick
-			end
-		}
+			protect { mouserelease(ev.x, ev.y) } if ev.button == 1
+		} if respond_to? :mouserelease
 
 		signal_connect('scroll_event') { |w, ev|
 			dir = case ev.direction
@@ -262,8 +252,7 @@ class DrawableWidget < Gtk::DrawingArea
 			when Gdk::EventScroll::Direction::DOWN; :down
 			else next
 			end
-			@last_kb_ev = ev
-			if keyboard_state(:control)
+			if ev.state & Gdk::Window::CONTROL_MASK == Gdk::Window::CONTROL_MASK
 				protect { mouse_wheel_ctrl(dir, ev.x, ev.y) } if respond_to? :mouse_wheel_ctrl
 			else
 				protect { mouse_wheel(dir, ev.x, ev.y) }
@@ -271,9 +260,8 @@ class DrawableWidget < Gtk::DrawingArea
 		} if respond_to? :mouse_wheel
 
 		signal_connect('key_press_event') { |w, ev|
-			@last_kb_ev = ev
 			key = Keyboard_trad[ev.keyval]
-			if keyboard_state(:control)
+			if ev.state & Gdk::Window::CONTROL_MASK == Gdk::Window::CONTROL_MASK
 				protect { keypress_ctrl(key) or (@parent_widget and @parent_widget.keypress_ctrl(key)) }
 			else
 				protect { keypress(key) or (@parent_widget and @parent_widget.keypress(key)) }
@@ -281,7 +269,12 @@ class DrawableWidget < Gtk::DrawingArea
 		}
 
 		signal_connect('realize') {
-			BasicColor.each { |tag, val|
+			{ :white => 'fff', :palegrey => 'ddd', :black => '000', :grey => '444',
+			  :red => 'f00', :darkred => '800', :palered => 'fcc',
+			  :green => '0f0', :darkgreen => '080', :palegreen => 'cfc',
+			  :blue => '00f', :darkblue => '008', :paleblue => 'ccf',
+			  :yellow => 'ff0', :darkyellow => '440', :paleyellow => 'ffc',
+			}.each { |tag, val|
 				@color[tag] = color(val)
 			}
 
@@ -305,11 +298,7 @@ class DrawableWidget < Gtk::DrawingArea
 	# create a color from a 'rgb' description
 	def color(val)
 		if not @color[val]
-			v = case val.length
-			when 3; val.scan(/./).map { |c| (c*4).to_i(16) }
-			when 6; val.scan(/../).map { |c| (c+c).to_i(16) }
-			end
-			@color[val] = Gdk::Color.new(*v)
+			@color[val] = Gdk::Color.new(*val.unpack('CCC').map { |c| (c.chr*4).hex })
 			window.colormap.alloc_color(@color[val], true, true)
 		end
 		@color[val]
@@ -340,32 +329,12 @@ class DrawableWidget < Gtk::DrawingArea
 		gui_update
 	end
 
-	def new_menu
-		toplevel.new_menu
-	end
-	def addsubmenu(*a, &b)
-		toplevel.addsubmenu(*a, &b)
-	end
-	def popupmenu(m, x, y)
-		toplevel.popupmenu(m, (x+allocation.x).to_i, (y+allocation.y).to_i)
-	end
-
 	# update @hl_word from a line & offset, return nil if unchanged
-	def update_hl_word(line, offset, mode=:asm)
+	def update_hl_word(line, offset)
 		return if not line
 		word = line[0...offset].to_s[/\w*$/] << line[offset..-1].to_s[/^\w*/]
 		word = nil if word == ''
-		if @hl_word != word
-			if word
-				if mode == :asm and defined?(@dasm) and @dasm
-					re = @dasm.gui_hilight_word_regexp(word)
-				else
-					re = Regexp.escape word
-				end
-				@hl_word_re = /^(.*?)(\b(?:#{re})\b)/
-			end
-			@hl_word = word
-		end
+		@hl_word = word if @hl_word != word
 	end
 
 	def paint
@@ -412,20 +381,6 @@ class DrawableWidget < Gtk::DrawingArea
 	end
 
 	def draw_rectangle(x, y, w, h)
-		# GTK clips coords around 0x8000
-		return if x > 0x7000 or y > 0x7000
-		if x < -0x7000
-			w += x + 100
-			x = -100
-		end
-		if y < -0x7000
-			h += y + 100
-			y = -100
-		end
-		return if w <= 0 or h <= 0
-		w = 0x7000 if w > 0x7000
-		h = 0x7000 if h > 0x7000
-
 		@w.draw_rectangle(@gc, true, x, y, w, h)
 	end
 
@@ -435,29 +390,6 @@ class DrawableWidget < Gtk::DrawingArea
 	end
 
 	def draw_line(x, y, ex, ey)
-		if x.abs > 0x7000
-			return if ex.abs > 0x7000 and ((ex < 0) == (x < 0))
-			ox = x
-			x = ((x > 0) ? 0x7000 : -0x7000)
-			y += (x-ox)*(ey-y)/(ex-ox)
-		end
-		if ex.abs > 0x7000
-			oex = ex
-			ex = ((ex > 0) ? 0x7000 : -0x7000)
-			ey += (ex-oex)*(y-ey)/(x-oex)
-		end
-		if y.abs > 0x7000
-			return if ey.abs > 0x7000 and ((ey < 0) == (y < 0))
-			oy = y
-			y = ((y > 0) ? 0x7000 : -0x7000)
-			x += (y-oy)*(ex-x)/(ey-oy)
-		end
-		if ey.abs > 0x7000
-			oey = ey
-			ey = ((ey > 0) ? 0x7000 : -0x7000)
-			ex += (ey-oey)*(x-ey)/(y-oey)
-		end
-
 		@w.draw_line(@gc, x, y, ex, ey)
 	end
 
@@ -467,7 +399,6 @@ class DrawableWidget < Gtk::DrawingArea
 	end
 
 	def draw_string(x, y, str)
-		return if x.abs > 0x7000 or y.abs > 0x7000
 		@layout.text = str
 		@w.draw_layout(@gc, x, y, @layout)
 	end
@@ -475,29 +406,6 @@ class DrawableWidget < Gtk::DrawingArea
 	def draw_string_color(col, x, y, str)
 		draw_color(col)
 		draw_string(x, y, str)
-	end
-
-	def clipboard_copy(buf)
-		clipboard = Gtk::Clipboard.get(Gdk::Selection::PRIMARY)
-		clipboard.text = buf
-	end
-
-	def clipboard_paste
-		clipboard = Gtk::Clipboard.get(Gdk::Selection::PRIMARY)
-		clipboard.wait_for_text
-	end
-
-	def keyboard_state(query=nil)
-		case query
-		when :control, :ctrl
-			ev = @last_kb_ev and ev.state & Gdk::Window::CONTROL_MASK == Gdk::Window::CONTROL_MASK
-		when :shift
-			ev = @last_kb_ev and ev.state & Gdk::Window::SHIFT_MASK   == Gdk::Window::SHIFT_MASK
-		when :alt
-			ev = @last_kb_ev and ev.state & Gdk::Window::MOD1_MASK    == Gdk::Window::MOD1_MASK
-		else
-			[:control, :shift, :alt].find_all { |s| keyboard_state(s) }
-		end
 	end
 end
 
@@ -547,10 +455,9 @@ class InputBox < Gtk::Dialog
 		end
 
 		@textwidget.signal_connect('key_press_event') { |w, ev|
-			key = DrawableWidget::Keyboard_trad[ev.keyval]
-			case key
-			when :escape; response(RESPONSE_REJECT) ; true
-			when :enter; response(RESPONSE_ACCEPT) ; true
+			case ev.keyval
+			when Gdk::Keyval::GDK_Escape; response(RESPONSE_REJECT) ; true
+			when Gdk::Keyval::GDK_Return, Gdk::Keyval::GDK_KP_Enter; response(RESPONSE_ACCEPT) ; true
 			end
 		}
 
@@ -731,7 +638,6 @@ class Window < Gtk::Window
 		@menubar = Gtk::MenuBar.new
 		@accel_group = Gtk::AccelGroup.new
 
-		set_gravity Gdk::Window::GRAVITY_STATIC
 		@vbox.add @menubar, 'expand' => false
 		@child = nil
 		s = Gdk::Screen.default
@@ -776,7 +682,6 @@ class Window < Gtk::Window
 		@vbox.remove @child if @child
 		@child = w
 		@vbox.add w if w
-		show_all
 	end
 
 	def widget
@@ -798,13 +703,6 @@ class Window < Gtk::Window
 		       l = from.map { |e| e.grep(::Array).map { |ae| find_menu(name, ae) }.compact.first }.compact.first
 		end
 		l.grep(::Array).first if l
-	end
-
-	def popupmenu(m, x, y)
-		mh = Gtk::Menu.new
-		m.each { |e| create_menu_item(mh, e) }
-		mh.show_all
-		mh.popup(nil, nil, 2, 0) { |_m, _x, _y, _p| [position[0]+x, position[1]+y, true] }
 	end
 
 	# append stuff to a menu
@@ -874,12 +772,14 @@ class Window < Gtk::Window
 			key = accel[-1]
 			if key == ?>
 				key = accel[/<(.*)>/, 1]
-				key = DrawableWidget::Keyboard_trad.index(case key
-				  when 'enter', 'esc', 'tab', /^f(\d\d?)$/i; key.downcase.to_sym
-				  else ??
-				  end)
+				key = case key
+				when 'enter'; Gdk::Keyval::GDK_Return
+				when 'esc'; Gdk::Keyval::GDK_Escape
+				when 'tab'; Gdk::Keyval::GDK_Tab
+				when /^f(\d\d?)$/i; Gdk::Keyval.const_get("GDK_#{key.upcase}")
+				else ??
+				end
 			end
-			key = key.unpack('C')[0] if key.kind_of? String	# yay rb19
 			item.add_accelerator('activate', @accel_group, key, (accel[0] == ?^ ? Gdk::Window::CONTROL_MASK : 0), Gtk::ACCEL_VISIBLE)
 		end
 		if action
@@ -891,9 +791,6 @@ class Window < Gtk::Window
 		end
 		menu.append item
 		item
-	end
-
-	def initialize_window
 	end
 end
 
@@ -909,6 +806,9 @@ class ToolWindow < Gtk::Dialog
 		show_all
 	end
 	
+	def initialize_window
+	end
+
 	def widget=(w)
 		remove @child if @child
 		@child = w
@@ -916,7 +816,6 @@ class ToolWindow < Gtk::Dialog
 		if @child.respond_to? :initial_size
 			resize(*@child.initial_size)
 		end
-		show_all
 	end
 
 	def widget

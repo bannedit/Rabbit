@@ -94,7 +94,7 @@ class CdecompListingWidget < DrawableWidget
 			if @hl_word
 				stmp = str
 				pre_x = 0
-				while stmp =~ @hl_word_re
+				while stmp =~ /^(.*?)(\b#{Regexp.escape @hl_word}\b)/
 					s1, s2 = $1, $2
 					pre_x += s1.length*@font_width
 					hl_w = s2.length*@font_width
@@ -159,14 +159,6 @@ class CdecompListingWidget < DrawableWidget
 			update_caret
 		when :end
 			@caret_x = @line_text[@caret_y].to_s.length
-			update_caret
-		when :pgup
-			@caret_y -= @cheight/2
-			@caret_y = 0 if @caret_y < 0
-			update_caret
-		when :pgdown
-			@caret_y += @cheight/2
-			@caret_y = @line_text.length if @caret_y > @line_text.length
 			update_caret
 		when ?n	# rename local/global variable
 			f = curfunc.initializer if curfunc and curfunc.initializer.kind_of? C::Block
@@ -246,12 +238,12 @@ class CdecompListingWidget < DrawableWidget
 	end
 
 	def get_cursor_pos
-		[@curaddr, @caret_x, @caret_y, @view_y]
+		[@curaddr, @caret_x, @caret_y]
 	end
 
 	def set_cursor_pos(p)
 		focus_addr p[0]
-		@caret_x, @caret_y, @view_y = p[1, 3]
+		@caret_x, @caret_y = p[1, 2]
 		update_caret
 	end
 
@@ -264,7 +256,7 @@ class CdecompListingWidget < DrawableWidget
 		invalidate_caret(@caret_x-@view_x, @caret_y-@view_y)
 		@oldcaret_x, @oldcaret_y = @caret_x, @caret_y
 
-		redraw if update_hl_word(@line_text[@caret_y], @caret_x, :c)
+		redraw if update_hl_word(@line_text[@caret_y], @caret_x)
 	end
 
 	# focus on addr

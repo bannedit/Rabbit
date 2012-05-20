@@ -371,10 +371,6 @@ class Disassembler
 	attr_accessor :backtrace_maxblocks_data
 	# max bt length for backtrace_fast blocks, default=0
 	attr_accessor :backtrace_maxblocks_fast
-	# max complexity for an Expr during backtrace before abort
-	attr_accessor :backtrace_maxcomplexity, :backtrace_maxcomplexity_data
-	# maximum number of instructions inside a basic block, split past this limit
-	attr_accessor :disassemble_maxblocklength
 	# a cparser that parsed some C header files, prototypes are converted to DecodedFunction when jumped to
 	attr_accessor :c_parser
 	# hash address => array of strings
@@ -423,9 +419,6 @@ class Disassembler
 		@address_binding = {}
 		@backtrace_maxblocks = @@backtrace_maxblocks
 		@backtrace_maxblocks_fast = 0
-		@backtrace_maxcomplexity = 40
-		@backtrace_maxcomplexity_data = 5
-		@disassemble_maxblocklength = 100
 		@comment = {}
 		@funcs_stdabi = true
 	end
@@ -505,18 +498,9 @@ class Disassembler
 
 	# parses a C string for function prototypes
 	def parse_c(str, filename=nil, lineno=1)
-		@c_parser_constcache = nil
 		@c_parser ||= @cpu.new_cparser
 		@c_parser.lexer.define_weak('__METASM__DECODE__')
 		@c_parser.parse(str, filename, lineno)
-	rescue ParseError
-		@c_parser.lexer.feed! ''
-		raise
-	end
-
-	# list the constants ([name, integer value]) defined in the C code (#define / enums)
-	def c_constants
-		@c_parser_constcache ||= @c_parser.numeric_constants
 	end
 
 	# returns the canonical form of addr (absolute address integer or label of start of section + section offset)
@@ -577,7 +561,6 @@ class Disassembler
 	end
 
 	# returns a hash associating addr => list of labels at this addr
-	# label_alias[a] may be nil if a new label is created elsewhere in the edata with the same name
 	def label_alias
 		if not @label_alias_cache
 			@label_alias_cache = {}
@@ -637,11 +620,12 @@ puts "  finalize subfunc #{Expression[addr]}" if debug_backtrace
 					detect_function_thunk(addr)
 				end
 			end
+			@comment[addr] ||= []
 			bd = f.backtrace_binding.reject { |k, v| Expression[k] == Expression[v] or Expression[v] == Expression::Unknown }
 			unk = f.backtrace_binding.map { |k, v| k if v == Expression::Unknown }.compact
 			bd[unk.map { |u| Expression[u].to_s }.sort.join(',')] = Expression::Unknown if not unk.empty?
-			add_comment(addr, "function binding: " + bd.map { |k, v| "#{k} -> #{v}" }.sort.join(', '))
-			add_comment(addr, "function ends at " + f.return_address.map { |ra| Expression[ra] }.join(', ')) if f.return_address
+			@comment[addr] |= ["function binding: " + bd.map { |k, v| "#{k} -> #{v}" }.sort.join(', ')]
+			@comment[addr] |= ["function ends at " + f.return_address.map { |ra| Expression[ra] }.join(', ')] if f.return_address
 		}
 	end
 
@@ -761,7 +745,7 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 
 		# try not to run for too long
 		# loop usage: break if the block continues to the following instruction, else return
-		@disassemble_maxblocklength.times {
+		100.times {
 			# check collision into a known block
 			break if @decoded[di_addr]
 
@@ -772,7 +756,8 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 				each_xref(waddr, :w) { |x|
 					#next if off + x.len < 0
 					puts "W: disasm: self-modifying code at #{Expression[waddr]}" if $VERBOSE
-					add_comment(di_addr, "overwritten by #{@decoded[x.origin]}")
+					@comment[di_addr] ||= []
+					@comment[di_addr] |= ["overwritten by #{@decoded[x.origin]}"]
 					@callback_selfmodifying[di_addr] if callback_selfmodifying
 					return
 				}
@@ -783,7 +768,6 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 			block.edata.ptr = di_addr - block.address + block.edata_ptr
 			if not di = @cpu.decode_instruction(block.edata, di_addr)
 				ed = block.edata
-				break if ed.ptr >= ed.length and get_section_at(di_addr) and di = block.list.last
 				puts "#{ed.ptr >= ed.length ? "end of section reached" : "unknown instruction #{ed.data[di_addr-block.address+block.edata_ptr, 4].to_s.unpack('H*')}"} at #{Expression[di_addr]}" if $VERBOSE
 				return
 			end
@@ -930,13 +914,12 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 
 		return ret if @decoded[di_addr]
 
-		@disassemble_maxblocklength.times {
+		100.times {
 			break if @decoded[di_addr]
 
 			# decode instruction
 			block.edata.ptr = di_addr - block.address + block.edata_ptr
 			if not di = @cpu.decode_instruction(block.edata, di_addr)
-				break if block.edata.ptr >= block.edata.length and get_section_at(di_addr) and di = block.list.last
 				return ret
 			end
 
@@ -952,9 +935,7 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 			if di.opcode.props[:stopexec] or di.opcode.props[:setip]
 				if di.opcode.props[:setip]
 					@addrs_todo = []
-					ar = @program.get_xrefs_x(self, di)
-					ar = @callback_newaddr[di.address, ar] || ar if callback_newaddr
-					ar.each { |expr|
+					@program.get_xrefs_x(self, di).each { |expr|
 						backtrace(expr, di.address, :origin => di.address, :type => :x, :maxdepth => @backtrace_maxblocks_fast)
 					}
 				end
@@ -977,13 +958,8 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 			end
 		}
 
-		ar = [di_addr]
-		ar = @callback_newaddr[block.list.last.address, ar] || ar if callback_newaddr
-		ar.each { |a|
-			di.block.add_to_normal(a)
-			ret << [a, di.address]
-		}
-		ret
+		di.block.add_to_normal(di_addr)
+		ret << [di_addr, di.address]
 	end
 
 	# handles when disassemble_fast encounters a call to a subfunction
@@ -1347,8 +1323,8 @@ puts "  finalize subfunc #{Expression[subfunc]}" if debug_backtrace
 		snapshot_addr   = nargs.delete(:snapshot_addr) || nargs.delete(:stopaddr)
 		maxdepth        = nargs.delete(:maxdepth) || @backtrace_maxblocks
 		detached        = nargs.delete :detached
-		max_complexity  = nargs.delete(:max_complexity) || @backtrace_maxcomplexity
-		max_complexity_data = nargs.delete(:max_complexity) || @backtrace_maxcomplexity_data
+		max_complexity  = nargs.delete(:max_complexity) || 40
+		max_complexity_data = nargs.delete(:max_complexity) || 8
 		bt_log          = nargs.delete :log	# array to receive the ongoing backtrace info
 		only_upto       = nargs.delete :only_upto
 		no_check        = nargs.delete :no_check
@@ -1933,7 +1909,7 @@ puts "   backtrace_indirection for #{ind.target} failed: #{ev}" if debug_backtra
 		if not xr.empty?
 			b["\n// Xrefs: #{xr[0, 8].join(' ')}#{' ...' if xr.length > 8}"]
 		end
-		if block.edata.inv_export[block.edata_ptr] and label_alias[block.address]
+		if block.edata.inv_export[block.edata_ptr]
 			b["\n"] if xr.empty?
 			label_alias[block.address].each { |name| b["#{name}:"] }
 		end
@@ -1950,8 +1926,8 @@ puts "   backtrace_indirection for #{ind.target} failed: #{ev}" if debug_backtra
 	# TODO array-style data access
 	def dump_data(addr, edata, off, &b)
 		b ||= lambda { |l| puts l }
-		if l = edata.inv_export[off] and label_alias[addr]
-			l_list = label_alias[addr].sort
+		if l = edata.inv_export[off]
+			l_list = label_alias[addr].to_a.sort
 			l = l_list.pop || l
 			l_list.each { |ll|
 				b["#{ll}:"]

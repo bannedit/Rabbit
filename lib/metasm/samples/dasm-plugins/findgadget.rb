@@ -40,7 +40,7 @@ def findgadget_asm_to_regex(asm)
 		fullre << '(' << opts_re.join('|') << ')'
 	}
 
-	Regexp.new(fullre, Regexp::MULTILINE, 'n')
+	Regexp.new(fullre, Regexp::MULTILINE)
 end
 
 # parse asm to a regexp, return the list of addresses matching

@@ -215,9 +215,9 @@ EOS
 	# TODO seh prototype (args => context)
 	# TODO hook on (non)resolution of :w xref
 	def get_xrefs_x(dasm, di)
-		if @cpu.shortname =~ /^ia32|^x64/ and a = di.instruction.args.first and a.kind_of?(Ia32::ModRM) and a.seg and a.seg.val == 4 and
+		if @cpu.shortname =~ /ia32|x64/ and a = di.instruction.args.first and a.kind_of? Ia32::ModRM and a.seg and a.seg.val == 4 and
 				w = get_xrefs_rw(dasm, di).find { |type, ptr, len| type == :w and ptr.externals.include? 'segment_base_fs' } and
-				dasm.backtrace(Expression[w[1], :-, 'segment_base_fs'], di.address).to_a.include?(Expression[0])
+				dasm.backtrace(Expression[w[1], :-, 'segment_base_fs'], di.address) == [Expression[0]]
 			sehptr = w[1]
 			sz = @cpu.size/8
 			sehptr = Indirection.new(Expression[Indirection.new(sehptr, sz, di.address), :+, sz], sz, di.address)
@@ -243,19 +243,17 @@ EOS
 			old_cp = d.c_parser
 			d.c_parser = nil
 			d.parse_c '__stdcall void *GetProcAddress(int, char *);'
-			d.parse_c '__stdcall void ExitProcess(int) __attribute__((noreturn));'
-			d.c_parser.lexer.define_weak('__MS_X86_64_ABI__') if @cpu.shortname == 'x64'
+			d.c_parser.lexer.define_weak('__MS_X86_64_ABI__') if @cpu.kind_of? X86_64
 			gpa = @cpu.decode_c_function_prototype(d.c_parser, 'GetProcAddress')
-			epr = @cpu.decode_c_function_prototype(d.c_parser, 'ExitProcess')
 			d.c_parser = old_cp
 			d.parse_c ''
-			d.c_parser.lexer.define_weak('__MS_X86_64_ABI__') if @cpu.shortname == 'x64'
+			d.c_parser.lexer.define_weak('__MS_X86_64_ABI__') if @cpu.kind_of? X86_64
 			@getprocaddr_unknown = []
 			gpa.btbind_callback = lambda { |dasm, bind, funcaddr, calladdr, expr, origin, maxdepth|
 				break bind if @getprocaddr_unknown.include? [dasm, calladdr] or not Expression[expr].externals.include? :eax
 				sz = @cpu.size/8
 				break bind if not dasm.decoded[calladdr]
-				if @cpu.shortname == 'x64'
+				if @cpu.kind_of? X86_64
 					arg2 = :rdx
 				else
 					arg2 = Indirection[[:esp, :+, 2*sz], sz, calladdr]
@@ -270,7 +268,6 @@ EOS
 				bind
 			}
 			d.function[Expression['GetProcAddress']] = gpa
-			d.function[Expression['ExitProcess']] = epr
 			d.function[:default] = @cpu.disassembler_default_func
 		end
 		d

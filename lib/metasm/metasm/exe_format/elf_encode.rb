@@ -48,7 +48,7 @@ class ELF
 		# creates .shstrtab if needed
 		def make_name_p elf
 			return 0 if not name or @name == ''
-			if elf.header.shstrndx.to_i == 0 or not elf.sections[elf.header.shstrndx]
+			if elf.header.shstrndx.to_i == 0
 				sn = Section.new
 				sn.name = '.shstrtab'
 				sn.type = 'STRTAB'
@@ -140,9 +140,6 @@ class ELF
 		srank = rank[s]
 		nexts = @sections.find { |sec| rank[sec] > srank }	# find section with rank superior
 		nexts = nexts ? @sections.index(nexts) : -1		# if none, last
-		if @header.shstrndx.to_i != 0 and nexts != -1 and @header.shstrndx >= nexts
-			@header.shstrndx += 1
-		end
 		@sections.insert(nexts, s)				# insert section
 	end
 
@@ -527,27 +524,10 @@ class ELF
 					ar.name = '.' + k.downcase
 					ar.type = k
 					ar.addralign = ar.entsize = @bitsize/8
-					ar.flags = %w[WRITE ALLOC]
-					ar.encoded = EncodedData.new
+					ar.flags = %w[WRITE ALLOC]	# why write ? base reloc ?
 					encode_add_section ar # insert before encoding syms/relocs (which need section indexes)
 				end
-
-				# fill these later, but create the base relocs now
-				arch_create_reloc_func = "arch_#{@header.machine.downcase}_create_reloc"
-				next if not respond_to?(arch_create_reloc_func) 
-				curaddr = label_at(@encoded, 0, 'elf_start')
-				fkbind = {}
-				@sections.each { |s|
-					next if not s.encoded
-					fkbind.update s.encoded.binding(Expression[curaddr, :+, 1])
-				}
-				@relocations ||= []
-				off = ar.encoded.length
-				@tag[k].each { |a|
-					rel = Metasm::Relocation.new(Expression[a], "u#@bitsize".to_sym, @endianness)
-					send(arch_create_reloc_func, ar, off, fkbind, rel)
-					off += @bitsize/8
-				}
+				# fill these later
 			end
 		}
 
@@ -575,6 +555,7 @@ class ELF
 				encode_tag['STRSZ', strtab.encoded.size]
 			when 'INIT_ARRAY', 'FINI_ARRAY', 'PREINIT_ARRAY'	# build section containing the array
 				ar = @sections.find { |s| s.name == '.' + k.downcase }
+				ar.encoded = EncodedData.new
 				@tag[k].each { |p| ar.encoded << encode_addr(p) }
 				encode_check_section_size ar
 				encode_tag[k, label_at(ar.encoded, 0)]
@@ -655,8 +636,8 @@ class ELF
 
 	# references to FUNC symbols are transformed to JMPSLOT relocations (aka call to .plt)
 	# TODO ET_REL support
-	def arch_386_create_reloc(section, off, binding, rel=nil)
-		rel ||= section.encoded.reloc[off]
+	def arch_386_create_reloc(section, off, binding)
+		rel = section.encoded.reloc[off]
 		if rel.endianness != @endianness or not [:u32, :i32, :a32].include? rel.type
 			puts "ELF: 386_create_reloc: ignoring reloc #{rel.target} in #{section.name}: bad reloc type" if $VERBOSE
 			return
@@ -694,8 +675,8 @@ class ELF
 		@relocations << r
 	end
 
-	def arch_x86_64_create_reloc(section, off, binding, rel=nil)
-		rel ||= section.encoded.reloc[off]
+	def arch_x86_64_create_reloc(section, off, binding)
+		rel = section.encoded.reloc[off]
 		if rel.endianness != @endianness or not rel.type.to_s =~ /^[aiu](32|64)$/
 			puts "ELF: x86_64_create_reloc: ignoring reloc #{rel.target} in #{section.name}: bad reloc type" if $VERBOSE
 			return
@@ -706,11 +687,7 @@ class ELF
 		r.offset = Expression[label_at(section.encoded, 0, 'sect_start'), :+, off]
 		if Expression[rel.target, :-, startaddr].bind(binding).reduce.kind_of?(::Integer)
 			# this location is relative to the base load address of the ELF
-			if rel.length != 8
-				puts "ELF: x86_64_create_reloc: ignoring reloc #{rel.target} in #{section.name}: relative non-x64" if $VERBOSE
-				return
-			end
-			r.type = 'RELATIVE'
+			r.type = 'RELATIVE'	# XXX 32 or 64bit field ?
 		else
 			et = rel.target.externals
 			extern = et.find_all { |name| not binding[name] }
@@ -735,8 +712,6 @@ class ELF
 				return
 			end
 		end
-		r.addend = Expression[rel.target]
-		#section.encoded.reloc.delete off
 		@relocations << r
 	end
 
@@ -1307,10 +1282,10 @@ class ELF
 				s.shndx = 'UNDEF'
 				@symbols << s
 			end
-			if v.has_attribute('init') or v.has_attribute('constructor')
+			if v.has_attribute 'init'
 				(@tag['INIT_ARRAY'] ||= []) << v.name
 			end
-			if v.has_attribute('fini') or v.has_attribute('destructor')
+			if v.has_attribute 'fini'
 				(@tag['FINI_ARRAY'] ||= []) << v.name
 			end
 			if v.has_attribute 'entrypoint'
@@ -1325,29 +1300,15 @@ class ELF
 			@header.entry = '_start'
 		elsif @sections.find { |s| s.encoded and s.encoded.export['main'] }
 			# entrypoint stack: [sp] = argc, [sp+1] = argv0, [sp+2] = argv1, [sp+argc+1] = 0, [sp+argc+2] = envp0, etc
-			case @cpu.shortname
-			when 'ia32'; assemble <<EOS
-_start:
-mov eax, [esp]
-lea ecx, [esp+4+4*eax+4]
-push ecx
-lea ecx, [esp+4+4]
-push ecx
-push eax
-call main
-push eax
-call _exit
+			compile_c case @cpu.shortname
+			when 'ia32'; <<EOS
+__stdcall int main(int, char **, char **);
+void _exit(int);
+void _start(char *argv0) {
+	_exit(main(*(int*)(&argv0-1), &argv0, &argv0 + *(int*)(&argv0-1) + 1 ));
+}
 EOS
-			when 'x64'; assemble <<EOS
-_start:
-mov rdi, [rsp]
-lea rsi, [rsp+8]
-lea rdx, [rsi+8*rdi+8]
-call main
-mov rdi, rax
-call _exit
-EOS
-			else compile_c <<EOS
+			else <<EOS
 void _exit(int);
 int main(int, char**, char**);
 void _start(void) {

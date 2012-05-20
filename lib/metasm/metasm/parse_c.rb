@@ -214,43 +214,17 @@ module C
 
 		attr_accessor :fldoffset, :fldbitoffset, :fldlist
 
-		def align(parser) @members.to_a.map { |m| m.type.align(parser) }.max end
+		def align(parser) @members.map { |m| m.type.align(parser) }.max end
 
-		# there is only one instance of a given named struct per parser
-		# so we just compare struct names here
-		# for comparison between parsers, see #compare_deep
 		def ==(o)
+			# if we dont compare names, infinite recursion on mylinkedlist == otherlinkedlist
 			o.object_id == self.object_id or
-			(o.class == self.class and o.name == self.name and ((o.name and true) or compare_deep(o)))
-		end
-
-		# compare to another structure, comparing members recursively (names and type)
-		# returns true if the self is same as o
-		def compare_deep(o, seen = [])
-			return true if o.object_id == self.object_id
-			return if o.class != self.class or o.name != self.name or o.attributes != self.attributes
-			o.members.to_a.zip(self.members.to_a).each { |om, sm|
-				return if om.name != sm.name
-				return if om.type != sm.type
-				if om.type.pointer?
-					ot = om.type
-					st = sm.type
-					500.times {	# limit for selfpointers (shouldnt happen)
-						break if not ot.pointer?
-						ot = ot.pointed.untypedef
-						st = st.pointed.untypedef
-					}
-					if ot.kind_of?(C::Union) and ot.name and not seen.include?(ot)
-						return if not st.compare_deep(ot, seen+[ot])
-					end
-				end
-			}
-			true
+			(o.class == self.class and o.name == self.name and o.members.to_a.map { |m| m.type } == self.members.to_a.map { |m| m.type } and o.attributes == self.attributes)
 		end
 
 		def findmember(name, igncase=false)
-			raise 'undefined structure' if not members
-			return @fldlist[name] if fldlist and @fldlist[name]
+			update_member_cache if not fldlist
+			return @fldlist[name] if @fldlist[name]
 
 			name = name.downcase if igncase
 			if m = @members.find { |m_| (n = m_.name) and (igncase ? n.downcase : n) == name }
@@ -267,15 +241,14 @@ module C
 		end
 
 		def offsetof(parser, name)
-			raise parser, 'undefined structure' if not members
-			update_member_cache(parser) if not fldlist
-			return 0 if @fldlist[name]
-
-			if name.kind_of?(Variable)
+			if name.kind_of? Variable
 				return 0 if @members.include? name
 				raise ParseError, 'unknown union member'
 			end
 
+			update_member_cache if not fldlist
+			return 0 if @fldlist[name]
+			raise parser, 'undefined union' if not @members
 			raise parser, 'unknown union member' if not findmember(name)
 
 			@members.find { |m|
@@ -284,9 +257,8 @@ module C
 		end
 
 		def bitoffsetof(parser, name)
-			raise parser, 'undefined structure' if not members
-			update_member_cache(parser) if not fldlist
-			return if @fldlist[name] or @members.include?(name)
+			update_member_cache if not fldlist
+			return if @fldlist[name]
 			raise parser, 'undefined union' if not @members
 			raise parser, 'unknown union member' if not findmember(name)
 
@@ -296,8 +268,8 @@ module C
 		end
 
 		def parse_members(parser, scope)
-			@fldlist = nil if fldlist	# invalidate fld offset cache
 			@members = []
+			@fldlist = {}
 			# parse struct/union members in definition
 			loop do
 				raise parser if not tok = parser.skipspaces
@@ -309,7 +281,8 @@ module C
 					member = basetype.dup
 					member.parse_declarator(parser, scope)
 					member.type.length ||= 0 if member.type.kind_of?(Array)	# struct { char blarg[]; };
-					raise member.backtrace, 'member redefinition' if member.name and @members.find { |m| m.name == member.name }
+					raise member.backtrace, 'member redefinition' if member.name and @fldlist[member.name]
+					@fldlist[member.name] = member if member.name
 					@members << member
 
 					raise tok || parser if not tok = parser.skipspaces or tok.type != :punct
@@ -339,7 +312,7 @@ module C
 		# updates the @fldoffset / @fldbitoffset hash storing the offset of members
 		def update_member_cache(parser)
 			@fldlist = {}
-			@members.to_a.each { |m|
+			@members.each { |m|
 				@fldlist[m.name] = m if m.name
 			}
 		end
@@ -371,7 +344,7 @@ module C
 			if nt = parser.skipspaces and nt.type == :punct and nt.raw == '.' and
 					nnt = parser.skipspaces and nnt.type == :string and
 					findmember(nnt.raw)
-				raise nnt, 'unhandled indirect initializer' if not nidx = @members.index(@members.find { |m| m.name == nnt.raw })	# TODO
+				raise nnt, 'unhandled indirect initializer' if not nidx = @members.index(@fldlist[nnt.raw])	# TODO
 				if not root
 					value[idx] ||= []	# AryRecorder may change [] to AryRec.new, can't do v = v[i] ||= []
 					value = value[idx]
@@ -394,52 +367,46 @@ module C
 	class Struct < Union
 		attr_accessor :pack
 
-		def align(parser) [@members.to_a.map { |m| m.type.align(parser) }.max || 1, (pack || 8)].min end
+		def align(parser) [@members.map { |m| m.type.align(parser) }.max || 1, (pack || 8)].min end
 
 		def offsetof(parser, name)
-			raise parser, 'undefined structure' if not members
-			update_member_cache(parser) if not fldlist
+			update_member_cache(parser) if not fldoffset
 			return @fldoffset[name] if @fldoffset[name]
-			return @fldoffset[name.name] if name.respond_to?(:name) and @fldoffset[name.name]
 
 			# this is almost never reached, only for <struct>.offsetof(anonymoussubstructmembername)
+			raise parser, 'undefined structure' if not @members
 			raise parser, 'unknown structure member' if (name.kind_of?(::String) ?  !findmember(name) : !@members.include?(name))
 
-			indirect = true if name.kind_of?(::String) and not @fldlist[name]
+			indirect = true if name.kind_of? ::String and not @fldlist[name]
 
 			al = align(parser)
 			off = 0
 			bit_off = 0
-			isz = nil
-
+			isz = parser.typesize[:int]
 			@members.each_with_index { |m, i|
 				if bits and b = @bits[i]
-					if not isz
-						mal = [m.type.align(parser), al].min
-						off = (off + mal - 1) / mal * mal
-					end
-					isz = parser.sizeof(m)
-					if b == 0 or (bit_off > 0 and bit_off + b > 8*isz)
+					if bit_off + b > 8*isz
 						bit_off = 0
-						mal = [m.type.align(parser), al].min
-						off = (off + isz + mal - 1) / mal * mal
+						off = (off + isz - 1) / isz * isz + isz
+					else
+						bit_off += b
 					end
 					break if m.name == name or m == name
-					bit_off += b
 				else
-					if isz
-						off += isz
+					if bit_off != 0
 						bit_off = 0
-						isz = nil
+						off = (off + isz - 1) / isz * isz + isz
 					end
-					mal = [m.type.align(parser), al].min
-					off = (off + mal - 1) / mal * mal
 				       	if m.name == name or m == name
+						mal = [m.type.align(parser), al].min
+						off = (off + mal - 1) / mal * mal
 						break
 					elsif indirect and m.type.untypedef.kind_of? Union and m.type.untypedef.findmember(name)
 						off += m.type.untypedef.offsetof(parser, name)
 						break
 					else
+						mal = [m.type.align(parser), al].min
+						off = (off + mal - 1) / mal * mal
 						off += parser.sizeof(m)
 					end
 				end
@@ -450,26 +417,15 @@ module C
 		# returns the [bitoffset, bitlength] of the field if it is a bitfield
 		# this should be added to the offsetof(field)
 		def bitoffsetof(parser, name)
-			raise parser, 'undefined structure' if not members
-			update_member_cache(parser) if not fldlist
+			update_member_cache if not fldlist
 			return @fldbitoffset[name] if fldbitoffset and @fldbitoffset[name]
-			return @fldbitoffset[name.name] if fldbitoffset and name.respond_to?(:name) and @fldbitoffset[name.name]
-			return if @fldlist[name] or @members.include?(name)
+			return if @fldlist[name]
 			raise parser, 'undefined union' if not @members
 			raise parser, 'unknown union member' if not findmember(name)
 
 			@members.find { |m|
-				m.type.untypedef.kind_of?(Union) and m.type.untypedef.findmember(name)
+				m.type.untypedef.kind_of? Union and m.type.untypedef.findmember(name)
 			}.type.untypedef.bitoffsetof(parser, name)
-		end
-
-		# returns the @member element that has offsetof(m) == off
-		def findmember_atoffset(parser, off)
-			return if not members
-			update_member_cache(parser) if not fldlist
-			if m = @fldoffset.index(off)
-				@fldlist[m]
-			end
 		end
 
 		def parse_members(parser, scope)
@@ -481,6 +437,8 @@ module C
 				@pack = p[/\d+/].to_i
 				raise parser, "illegal struct pack(#{p})" if @pack == 0
 			end
+
+			update_member_cache(parser)
 		end
 
 		# updates the @fldoffset / @fldbitoffset hash storing the offset of members
@@ -493,31 +451,29 @@ module C
 			al = align(parser)
 			off = 0
 			bit_off = 0
-			isz = nil
+			isz = parser.typesize[:int]
 
 			@members.each_with_index { |m, i|
 				if bits and b = @bits[i]
-					if not isz
-						mal = [m.type.align(parser), al].min
-						off = (off + mal - 1) / mal * mal
-					end
-					isz = parser.sizeof(m)
-					if b == 0 or (bit_off > 0 and bit_off + b > 8*isz)
-						bit_off = 0
-						mal = [m.type.align(parser), al].min
-						off = (off + isz + mal - 1) / mal * mal
-					end
 					if m.name
 						@fldoffset[m.name] = off
 						@fldbitoffset ||= {}
 						@fldbitoffset[m.name] = [bit_off, b]
 					end
-					bit_off += b
-				else
-					if isz
-						off += isz
+					if bit_off + b > 8*isz
 						bit_off = 0
-						isz = nil
+						off = (off + isz - 1) / isz * isz + isz
+						if m.name
+							@fldoffset[m.name] = off
+							@fldbitoffset[m.name] = [bit_off, b]
+						end
+					else
+						bit_off += b
+					end
+				else
+					if bit_off != 0
+						off = (off + isz - 1) / isz * isz + isz
+						bit_off = 0
 					end
 					mal = [m.type.align(parser), al].min
 					off = (off + mal - 1) / mal * mal
@@ -901,26 +857,6 @@ module C
 							end
 						end
 					end
-				# allow shell-style heredoc: asm <<EOS\n<asm>\nEOS
-				elsif tok.type == :punct and tok.raw == '<'
-					raise ftok, 'bad asm heredoc' if not tok = parser.lexer.readtok or tok.type != :punct or tok.raw != '<'
-					delimiter = parser.lexer.readtok
-					if delimiter.type == :punct and delimiter.raw == '-'
-						skipspc = true
-						delimiter = parser.lexer.readtok
-					end
-					raise ftok, 'bad asm heredoc delim' if delimiter.type != :string or not tok = parser.lexer.readtok or tok.type != :eol
-					nl = true
-					loop do
-						raise ftok, 'unterminated heredoc' if not tok = parser.lexer.readtok
-						break if nl and tok.raw == delimiter.raw
-						raw = tok.raw
-						raw = "\n" if skipspc and tok.type == :eol
-						body << raw
-						nl = (tok.type == :eol and (raw[-1] == ?\n or raw[-1] == ?\r))
-					end
-				# MS single-instr: asm inc eax;
-				# also allow asm "foo bar\nbaz";
 				else
 					parser.lexer.unreadtok tok
 					loop do
@@ -1522,12 +1458,12 @@ EOH
 			when Enum
 				@typesize[:int]
 			when Struct
-				raise self, "unknown structure size #{type.name}" if not type.members
+				raise self, 'unknown structure size' if not type.members
 				al = type.align(self)
 				lm = type.members.last
 				lm ? (type.offsetof(self, lm) + sizeof(lm) + al - 1) / al * al : 0
 			when Union
-				raise self, "unknown structure size #{type.name}" if not type.members
+				raise self, 'unknown structure size' if not type.members
 				type.members.map { |m| sizeof(m) }.max || 0
 			when TypeDef
 				sizeof(var, type.type)
@@ -1886,11 +1822,10 @@ EOH
 				name = tok.raw
 				raise tok, 'bad struct name' if Keyword[name] or (?0..?9).include?(name[0])
 				@type.backtrace = tok
-				@type.name = name
+				@type.name = tok.raw
 				@type.parse_attributes(parser)
 				raise parser if not ntok = parser.skipspaces
 				if ntok.type != :punct or ntok.raw != '{'
-					raise tok, "struct/union confusion" if scope.struct[name] and scope.struct[name].class != @type.class
 					# variable declaration
 					parser.unreadtok ntok
 					if ntok.type == :punct and ntok.raw == ';'
@@ -1899,22 +1834,19 @@ EOH
 						@type = scope.struct[name] ||= @type
 					else
 						# check that the structure exists
+						# do not check it is declared (may be a pointer)
 						struct = scope.struct_ancestors[name]
 						# allow incomplete types, usage as var type will raise later
 						struct = scope.struct[name] = @type if not struct
-						raise tok, 'unknown struct' if struct.class != @type.class
+						raise tok, 'unknown struct' if not struct.kind_of?(@type.class)
 						(struct.attributes ||= []).concat @type.attributes if @type.attributes
-						(struct.qualifier  ||= []).concat @type.qualifier  if @type.qualifier	# XXX const struct foo bar => bar is const, not foo...
+						(struct.qualifier  ||= []).concat @type.qualifier  if @type.qualifier
 						@type = struct
 					end
 					return
 				end
-				if scope.struct[name] and scope.struct[name].members
-					# redefinition of an existing struct, save for later comparison
-					oldstruct = scope.struct[name]
-					raise tok, "struct/union confusion" if oldstruct.class != @type.class
-				elsif struct = scope.struct[name]
-					raise tok, "struct/union confusion" if struct.class != @type.class
+				raise tok, 'struct redefinition' if struct = scope.struct[name] and struct.members
+				if struct
 					(struct.attributes ||= []).concat @type.attributes if @type.attributes
 					(struct.qualifier  ||= []).concat @type.qualifier  if @type.qualifier
 					struct.backtrace = @type.backtrace
@@ -1928,13 +1860,6 @@ EOH
 			end
 
 			@type.parse_members(parser, scope)
-
-			if oldstruct
-				if not @type.compare_deep(oldstruct)
-					raise tok, "conflicting struct redefinition (old at #{oldstruct.backtrace.exception(nil).message rescue :unknown})"
-				end
-				@type = oldstruct
-			end
 		end
 
 		# parses int/long int/long long/double etc
@@ -1944,10 +1869,7 @@ EOH
 			name = :int
 			tok = nil
 			loop do
-				if not tok = parser.skipspaces
-					raise parser if specifier.empty?
-					break
-				end
+				raise parser if not tok = parser.skipspaces
 				if tok.type != :string
 					parser.unreadtok tok
 					break
@@ -2161,8 +2083,6 @@ EOH
 						raise parser, '"{" expected' if not tok = parser.skipspaces or tok.type != :punct or tok.raw != '{'
 						parser.unreadtok tok
 					end
-					namedargs = t.type.args.map { |a| a.name }.compact - [false]
-					raise tok, "duplicate argument name #{namedargs.find { |a| namedargs.index(a) != namedargs.rindex(a) }.inspect}" if namedargs.length != namedargs.uniq.length
 				end
 				parse_attributes(parser, true)	# should be type.attrs, but this should be more existing-compiler-compatible
 			else
@@ -2273,7 +2193,7 @@ EOH
 				t = @type.untypedef
 				case t
 				when BaseType
-				when Pointer; return self if @op
+				when Pointer; return self #raise parser, 'address unknown for now'
 				else
 					return @rexpr if not @op and not @lexpr and @rexpr.kind_of? Variable and @rexpr.type == @type
 					return self # raise parser, 'not arithmetic type'
@@ -2305,12 +2225,11 @@ EOH
 				end
 
 				# overflow
-				tn = (t.pointer? ? :ptr : t.name)
-				case tn
+				case t.name
 				when :char, :short, :int, :long, :ptr, :longlong, :__int8, :__int16, :__int32, :__int64
-					max = 1 << (8*parser.typesize[tn])
+					max = 1 << (8*parser.typesize[t.name])
 					ret = ret.to_i & (max-1)
-					if not t.pointer? and t.specifier != :unsigned and (ret & (max >> 1)) > 0	# char == unsigned char
+					if t.specifier == :signed and (ret & (max >> 1)) > 0	# char == unsigned char
 						ret - max
 					else
 						ret
@@ -2520,7 +2439,6 @@ EOH
 						type = :long if suffix.count('l') == 1
 					end
 					val = CExpression[val, BaseType.new(type, *specifier)]
-					val = parse_value_postfix(parser, scope, val)
 				else raise parser, "internal error #{val.inspect}"
 				end
 
@@ -2528,7 +2446,6 @@ EOH
 				if tok.raw[0] == ?'
 					raise tok, 'invalid character constant' if not [1, 2, 4, 8].include? tok.value.length	# TODO 0fill
 					val = CExpression[Expression.decode_imm(tok.value, tok.value.length, :big), BaseType.new(:int)]
-					val = parse_value_postfix(parser, scope, val)
 				else
 					val = CExpression[tok.value, Pointer.new(BaseType.new(tok.raw[0, 2] == 'L"' ? :short : :char))]
 					val = parse_value_postfix(parser, scope, val)
@@ -2728,109 +2645,96 @@ EOH
 			end
 		end
 
-		def parse_popstack(parser, stack, opstack)
-			r = stack.pop
-			l = stack.pop
-			case op = opstack.pop
-			when :'?:'
-				stack << CExpression.new(stack.pop, op, [l, r], l.type)
-			when :','
-				stack << CExpression.new(l, op, r, r.type)
-			when :'='
-				unless r.kind_of?(CExpression) and not r.lexpr and r.type.kind_of?(BaseType) and
-				    ((not r.op and r.rexpr.kind_of?(Integer)) or
-				     (r.op == :- and r.rexpr.kind_of?(CExpression) and not r.rexpr.op and not r.rexpr.lexpr and r.rexpr.rexpr.kind_of?(Integer))) and
-				     l.kind_of?(Typed) and (l.type.untypedef.kind_of?(BaseType) or (l.type.untypedef.kind_of?(Pointer) and r.rexpr == 0))
-					# avoid useless warnings on unsigned foo = -1  /  void *foo = 0
-					parser.check_compatible_type(parser, r.type, l.type)
-				end
-				if l.kind_of?(Typed) and (lt = l.type.untypedef).kind_of?(BaseType) and r.kind_of?(Typed) and (rt = r.type.untypedef).kind_of?(BaseType) and lt.specifier != :unsigned and rt.specifier == :unsigned and parser.typesize[lt.name] > parser.typesize[rt.name]
-					# (int32)i = (uchar)255 => 255, not -1
-					r = CExpression.new(nil, nil, r, BaseType.new(lt.name, :unsigned))
-				end
-				stack << CExpression.new(l, op, r, l.type)
-			when :'&&', :'||'
-				stack << CExpression.new(l, op, r, BaseType.new(:int))
-			else
-				# XXX struct == struct ?
-				raise parser, "invalid type #{l.type} #{l} for #{op.inspect}" if not l.type.arithmetic? and not parser.allow_bad_c
-				raise parser, "invalid type #{r.type} #{r} for #{op.inspect}" if not r.type.arithmetic? and not parser.allow_bad_c
-
-				if l.type.pointer? and r.type.pointer?
-					type = \
-					case op
-					when :'-'; BaseType.new(:long)	# addr_t or sumthin ?
-					when :'-='; l.type
-					when :'>', :'>=', :'<', :'<=', :'==', :'!='; BaseType.new(:long)
-					else raise parser, "cannot do #{op.inspect} on pointers" unless parser.allow_bad_c ; l.type
-					end
-				elsif l.type.pointer? or r.type.pointer?
-					puts parser.exception("should not #{op.inspect} a pointer").message if $VERBOSE and not [:'+', :'-', :'=', :'+=', :'-=', :==, :'!='].include? op
-					type = l.type.pointer? ? l.type : r.type
-				elsif RIGHTASSOC[op] and op != :'?:'	# += etc
-					type = l.type
-				else
-					# yay integer promotion
-					lt = l.type.untypedef
-					rt = r.type.untypedef
-					if    (t = lt).name == :longdouble or (t = rt).name == :longdouble or
-					      (t = lt).name == :double or (t = rt).name == :double or
-					      (t = lt).name == :float or (t = rt).name == :float
-					# long double > double > float ...
-						type = t
-					elsif true
-						# custom integer rules based on type sizes
-						lts = parser.typesize[lt.name]
-						rts = parser.typesize[rt.name]
-						its = parser.typesize[:int]
-						if not lts or not rts
-							type = BaseType.new(:int)
-						elsif lts >  rts and lts >= its
-							type = lt
-						elsif rts >  lts and rts >= its
-							type = rt
-						elsif lts == rts and lts >= its
-							type = lt
-							type = rt if rt.specifier == :unsigned
-						else
-							type = BaseType.new(:int)
-						end
-						# end of custom rules
-					elsif ((t = lt).name == :long and t.specifier == :unsigned) or
-					      ((t = rt).name == :long and t.specifier == :unsigned)
-					# ... ulong ...
-						type = t
-					elsif (lt.name == :long and rt.name == :int and rt.specifier == :unsigned) or
-					      (rt.name == :long and lt.name == :int and lt.specifier == :unsigned)
-					# long+uint => ulong
-						type = BaseType.new(:long, :unsigned)
-					elsif (t = lt).name == :long or (t = rt).name == :long or
-					      ((t = lt).name == :int and t.specifier == :unsigned) or
-					      ((t = rt).name == :int and t.specifier == :unsigned)
-					# ... long > uint ...
-						type = t
-					else
-					# int
-						type = BaseType.new(:int)
-					end
-				end
-
-				case op
-				when :'>', :'>=', :'<', :'<=', :'==', :'!='
-					# cast both sides
-					l = CExpression[l, type] if l.type != type
-					r = CExpression[r, type] if r.type != type
-					stack << CExpression.new(l, op, r, BaseType.new(:int))
-				else
-					# promote result
-					stack << CExpression.new(l, op, r, type)
-				end
-			end
-		end
-
 		def parse(parser, scope, allow_coma = true)
 			opstack = []
 			stack = []
+
+			popstack = lambda {
+				r, l = stack.pop, stack.pop
+				case op = opstack.pop
+				when :'?:'
+					stack << CExpression.new(stack.pop, op, [l, r], l.type)
+				when :','
+					stack << CExpression.new(l, op, r, r.type)
+				when :'='
+					parser.check_compatible_type(parser, r.type, l.type)
+					stack << CExpression.new(l, op, r, l.type)
+				when :'&&', :'||'
+					stack << CExpression.new(l, op, r, BaseType.new(:int))
+				else
+					# XXX struct == struct ?
+					raise parser, "invalid type #{l.type} #{l} for #{op.inspect}" if not l.type.arithmetic? and not parser.allow_bad_c
+					raise parser, "invalid type #{r.type} #{r} for #{op.inspect}" if not r.type.arithmetic? and not parser.allow_bad_c
+
+					if l.type.pointer? and r.type.pointer?
+						type = \
+						case op
+						when :'-'; BaseType.new(:long)	# addr_t or sumthin ?
+						when :'-='; l.type
+						when :'>', :'>=', :'<', :'<=', :'==', :'!='; BaseType.new(:long)
+						else raise parser, "cannot do #{op.inspect} on pointers" unless parser.allow_bad_c ; l.type
+						end
+					elsif l.type.pointer? or r.type.pointer?
+						puts parser.exception("should not #{op.inspect} a pointer").message if $VERBOSE and not [:'+', :'-', :'=', :'+=', :'-=', :==, :'!='].include? op
+						type = l.type.pointer? ? l.type : r.type
+					else
+						# yay integer promotion
+						lt = l.type.untypedef
+						rt = r.type.untypedef
+						if    (t = lt).name == :longdouble or (t = rt).name == :longdouble or
+						      (t = lt).name == :double or (t = rt).name == :double or
+						      (t = lt).name == :float or (t = rt).name == :float
+						# long double > double > float ...
+							type = t
+						elsif true
+							# custom integer rules based on type sizes
+							lts = parser.typesize[lt.name]
+							rts = parser.typesize[rt.name]
+							its = parser.typesize[:int]
+							if not lts or not rts
+								type = BaseType.new(:int)
+							elsif lts >  rts and lts >= its
+								type = lt
+							elsif rts >  lts and rts >= its
+								type = rt
+							elsif lts == rts and lts >= its
+								type = lt
+								type = rt if rt.specifier == :unsigned
+							else
+								type = BaseType.new(:int)
+							end
+							# end of custom rules
+						elsif ((t = lt).name == :long and t.specifier == :unsigned) or
+						      ((t = rt).name == :long and t.specifier == :unsigned)
+						# ... ulong ...
+							type = t
+						elsif (lt.name == :long and rt.name == :int and rt.specifier == :unsigned) or
+						      (rt.name == :long and lt.name == :int and lt.specifier == :unsigned)
+						# long+uint => ulong
+							type = BaseType.new(:long, :unsigned)
+						elsif (t = lt).name == :long or (t = rt).name == :long or
+						      ((t = lt).name == :int and t.specifier == :unsigned) or
+						      ((t = rt).name == :int and t.specifier == :unsigned)
+						# ... long > uint ...
+							type = t
+						else
+						# int
+							type = BaseType.new(:int)
+						end
+					end
+
+					case op
+					when :'>', :'>=', :'<', :'<=', :'==', :'!='
+						# cast both sides
+						l = CExpression[l, type] if l.type != type
+						r = CExpression[r, type] if r.type != type
+						stack << CExpression.new(l, op, r, BaseType.new(:int))
+					else
+						# promote result
+						stack << CExpression.new(l, op, r, type)
+					end
+				end
+			}
 
 			return if not e = parse_value(parser, scope)
 
@@ -2841,7 +2745,7 @@ EOH
 				when :'?'
 					# a, b ? c, d : e, f  ==  a, (b ? (c, d) : e), f
 					until opstack.empty? or OP_PRIO[opstack.last][:'?:']
-						parse_popstack(parser, stack, opstack)
+						popstack[]
 					end
 					stack << parse(parser, scope)
 					raise op || parser, '":" expected' if not op = readop(parser) or op.value != :':'
@@ -2856,7 +2760,7 @@ EOH
 						break
 					end
 					until opstack.empty? or OP_PRIO[op.value][opstack.last]
-						parse_popstack(parser, stack, opstack)
+						popstack[]
 					end
 				end
 
@@ -2866,7 +2770,7 @@ EOH
 			end
 
 			until opstack.empty?
-				parse_popstack(parser, stack, opstack)
+				popstack[]
 			end
 
 			CExpression[stack.first]
@@ -2887,36 +2791,22 @@ EOH
 		# str is a reference to the underlying ruby String
 		# stroff is the offset from the start of this string (non-nul for nested structs)
 		# cp is a reference to the C::Parser
-		# struct to the C::Union/Struct/Array
-		# sizeof is the byte size of the C struct
-		attr_accessor :str, :stroff, :cp, :struct
-		attr_writer :sizeof
+		# struct to the C::Union/Struct
+		# length is the byte size of the C struct
+		attr_accessor :str, :stroff, :cp, :struct, :length
 		def initialize(cp, struct, str=nil, stroff=0)
 			@cp, @struct = cp, struct
-			@str = str || [0].pack('C')*sizeof
+			@length = @cp.sizeof(@struct)
+			@str = str || [0].pack('C')*@length
 			@stroff = stroff
 		end
 
-		def sizeof
-			@sizeof ||= @cp.sizeof(@struct)
-		end
-
 		def [](*a)
-			if @struct.kind_of? C::Array and a.length == 1 and @struct.length and a[0].kind_of? Integer
-				i = a[0]
-				raise "#{i} out of bounds 0...#{@struct.length}" if  i < 0 or i >= @struct.length
-				off = @stroff + i*@cp.sizeof(@struct.type)
-				return @cp.decode_c_value(@str, @struct.type, off)
-			end
-
-			return @str[@stroff..-1][*a] if a.length != 1
-			a = a.first
-			return @str[@stroff..-1][a] if not a.kind_of? Symbol and not a.kind_of? String and not a.kind_of? C::Variable
-			f = a
-			raise "#{a.inspect} not a member" if not f.kind_of? C::Variable and not f = @struct.findmember(a.to_s, true)
-			a = f.name || f
-			off = @stroff + @struct.offsetof(@cp, a)
-			if bf = @struct.bitoffsetof(@cp, a)
+			return @str[@stroff..-1][*a] if not a.first.kind_of? Symbol and not a.first.kind_of? String
+			fld = a.first
+			raise "#{fld.inspect} not a member" if not f = @struct.findmember(fld.to_s, true)
+			off = @stroff + @struct.offsetof(@cp, f.name)
+			if bf = @struct.bitoffsetof(@cp, f.name)
 				ft = C::BaseType.new((bf[0] + bf[1] > 32) ? :__int64 : :__int32)
 				v = @cp.decode_c_value(@str, ft, off)
 				(v >> bf[0]) & ((1 << bf[1])-1)
@@ -2926,16 +2816,7 @@ EOH
 		end
 
 		def []=(*a)
-			if @struct.kind_of? C::Array and a.length == 2 and @struct.length and a[0].kind_of? Integer
-				i = a[0]
-				raise "#{i} out of bounds 0...#{@struct.length}" if  i < 0 or i >= @struct.length
-				off = @stroff + i*@cp.sizeof(@struct.type)
-				val = @cp.encode_c_value(@struct.type, a[1])
-				@str[off, val.length] = val
-				return
-			end
-
-			if not a.first.kind_of? Symbol and not a.first.kind_of? String and not a.first.kind_of? C::Variable
+			if not a.first.kind_of? Symbol and not a.first.kind_of? String
 				# patch @str[@stroff..-1] like a string
 				# so we must find the intended start offset, and add @stroff to it
 				if @stroff != 0
@@ -2957,15 +2838,13 @@ EOH
 				return @str.send(:'[]=', *a)	# XXX *should* work...
 			end
 
-			a, val = a
-			f = a
-			raise "#{a.inspect} not a struct member" if not f.kind_of? C::Variable and not f = @struct.findmember(a.to_s, true)
-			a = f.name || f
-			val = sizeof if val == :size
-			off = @stroff + @struct.offsetof(@cp, a)
+			fld, val = a
+			raise "#{fld.inspect} not a struct member" if not f = @struct.findmember(fld.to_s, true)
+			val = @length if val == :size
+			off = @stroff + @struct.offsetof(@cp, f.name)
 
-			if bf = @struct.bitoffsetof(@cp, a)
-				raise "only Integers supported in bitfield #{a}, got #{val.inspect}" if not val.kind_of?(::Integer)
+			if bf = @struct.bitoffsetof(@cp, f.name)
+				raise "only Integers supported in bitfield #{f.name}, got #{val.inspect}" if not val.kind_of?(::Integer)
 				# struct { int i:8; };  =>  size 8 or 32 ?
 				ft = C::BaseType.new((bf[0] + bf[1] > 32) ? :__int64 : :__int32)
 				mask = ((1 << bf[1]) - 1) << bf[0]
@@ -2981,157 +2860,34 @@ EOH
 		# virtual accessors to members
 		# struct.foo is aliased to struct['foo'],
 		# struct.foo = 42 aliased to struct['foo'] = 42
-		def method_missing(on, *a)
-			n = on.to_s
+		def method_missing(n, *a)
+			n = n.to_s
 			if n[-1] == ?=
 				send :[]=, n[0...-1], *a
 			else
-				super(on, *a) if not @struct.kind_of?(C::Union) or not @struct.findmember(n, true)
 				send :[], n, *a
 			end
-		end
-
-		def to_s(off=nil, maxdepth=500)
-			return '{ /* ... */ }' if maxdepth <= 0
-			str = ['']
-			if @struct.kind_of?(C::Array)
-				str.last << "#{@struct.type} x[#{@struct.length}] = " if not off
-				mlist = (0...@struct.length)
-				fldoff = mlist.inject({}) { |h, i| h.update i => i*@cp.sizeof(@struct.type) }
-			elsif @struct.kind_of?(C::Struct)
-				str.last << "struct #{@struct.name || '_'} x = " if not off
-				@struct.update_member_cache(@cp) if not @struct.fldlist
-				fldoff = @struct.fldoffset
-				fbo = @struct.fldbitoffset || {}
-				mlist = @struct.members.map { |m| m.name || m }
-			else
-				str.last << "union #{@struct.name || '_'} x = " if not off
-				mlist = @struct.members.map { |m| m.name || m }
-			end
-			str.last << '{'
-			mlist.each { |k|
-				if k.kind_of? Variable	# anonymous member
-					curoff = off.to_i + @struct.offsetof(@cp, k)
-					val = self[k]
-					k = '?'
-				else
-					curoff = off.to_i + (fldoff ? fldoff[k].to_i : 0)
-					val = self[k]
-				end
-				if val.kind_of?(::Integer)
-					if val >= 0x100
-						val = '0x%X,   // +%x' % [val, curoff]
-					elsif val <= -0x100
-						val = '-0x%X,   // +%x' % [-val, curoff]
-					else
-						val = '%d,   // +%x' % [val, curoff]
-					end
-				elsif val.kind_of? AllocCStruct
-					val = val.to_s(curoff, maxdepth-1)
-				elsif not val
-					val = 'NULL,   // +%x' % curoff # pointer with NULL value
-				else
-					val = val.to_s.sub(/$/, ',   // +%x' % curoff)
-				end
-				val = val.gsub("\n", "\n\t")
-				str << "\t#{k.kind_of?(::Integer) ? "[#{k}]" : ".#{k}"} = #{val}"
-			}
-			str << '}'
-			str.last << (off ? ',' : ';')
-			str.join("\n")
-		end
-
-		def to_array
-			raise NoMethodError, "Not an Array" if not @struct.kind_of?(C::Array)
-			ary = []
-			@struct.length.times { |i| ary << self[i] }
-			ary
-		end
-
-		def to_strz
-			raise NoMethodError, "Not an Array" if not @struct.kind_of?(C::Array)
-			a = to_array
-			a[a.index(0)..-1] = [] if a.index(0)
-			a.pack('C*')
 		end
 	end
 
 	class Parser
-		# find a Struct/Union object from a struct name/typedef name
-		# raises if it cant find it
-		def find_c_struct(structname)
-			structname = structname.to_s if structname.kind_of?(::Symbol)
-			if structname.kind_of?(::String) and not struct = @toplevel.struct[structname]
-				struct = @toplevel.symbol[structname]
-				raise "unknown struct #{structname.inspect}" if not struct
-				struct = struct.type.untypedef
-				struct = struct.pointed while struct.pointer?
-				raise "unknown struct #{structname.inspect}" if not struct.kind_of? C::Union
-			end
-			struct = structname if structname.kind_of? C::Union
-			raise "unknown struct #{structname.inspect}" if not struct.kind_of? C::Union
-			struct
-		end
-
-		# find a C::Type (struct/union/typedef/basetype) from a string
-		def find_c_type(typename)
-			typename = typename.to_s if typename.kind_of? ::Symbol
-			if typename.kind_of?(::String) and not type = @toplevel.struct[typename]
-				if type = @toplevel.symbol[typename]
-					type = type.type.untypedef
-				else
-					begin
-						lexer.feed(typename)
-						b = C::Block.new(@toplevel)
-						var = Variable.parse_type(self, b)
-						var.parse_declarator(self, b)
-						type = var.type
-					rescue
-					end
-				end
-			end
-			type = typename if typename.kind_of?(C::Type)
-			raise "unknown type #{typename.inspect}" if not type.kind_of? C::Type
-			type
-		end
+		# TODO alloc_c_ptr to allocate a buffer of sizeof(arg) and return a ptr to it ( ReadFile(..., &lengthRead) )
 
 		# allocate a new AllocCStruct from the struct/struct typedef name of the current toplevel
 		# optionally populate the fields using the 'values' hash
 		def alloc_c_struct(structname, values=nil)
-			struct = find_c_struct(structname)
+			structname = structname.to_s if structname.kind_of?(::Symbol)
+			if structname.kind_of?(::String) and not struct = @toplevel.struct[structname]
+				struct = @toplevel.symbol[structname]
+				raise "unknown struct #{structname.inspect}" if not struct
+				struct = struct.type
+				struct = struct.pointed while struct.pointer?
+				raise "unknown struct #{structname.inspect}" if not struct.kind_of? Union
+			end
+			struct = structname if structname.kind_of? Union
 			st = AllocCStruct.new(self, struct)
 			values.each { |k, v| st[k] = v } if values
 			st
-		end
-
-		# parse a given String as an AllocCStruct
-		# offset is an optionnal offset from the string start
-		# modification to the structure will modify the underlying string
-		def decode_c_struct(structname, str, offset=0)
-			struct = find_c_struct(structname)
-			AllocCStruct.new(self, struct, str, offset)
-		end
-
-		# allocate an array of types
-		# init is either the length of the array, or an array of initial values
-		def alloc_c_ary(typename, init=1)
-			type = find_c_type(typename)
-			len = init.kind_of?(Integer) ? init : init.length
-			struct = C::Array.new(type, len)
-			st = AllocCStruct.new(self, struct)
-			if init.kind_of?(::Array)
-				init.each_with_index { |v, i|
-					st[i] = v
-				}
-			end
-			st
-		end
-
-		# "cast" a string to C::Array
-		def decode_c_ary(typename, len, str, offset=0)
-			type = find_c_type(typename)
-			struct = C::Array.new(type, len)
-			AllocCStruct.new(self, struct, str, offset)
 		end
 
 		# convert (pack) a ruby value into a C buffer
@@ -3140,7 +2896,6 @@ EOH
 			type = type.type if type.kind_of? Variable
 
 			case val
-			when nil; val = 0
 			when ::Integer
 			when ::String
 				val = DynLdr.str_ptr(val)
@@ -3165,8 +2920,7 @@ EOH
 
 		def decode_c_value(str, type, off=0)
 			type = type.type if type.kind_of? Variable
-			type = type.untypedef
-			if type.kind_of? C::Union or type.kind_of? C::Array
+			if type.kind_of? Union
 				return AllocCStruct.new(self, type, str, off)
 			end
 			val = Expression.decode_immediate(str, sizeof(type), @endianness, off)

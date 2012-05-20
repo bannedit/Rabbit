@@ -196,8 +196,6 @@ class ELF
 		# ((gnu_hash(sym[M].name) % C) == B			||
 		# ((gnu_hash(sym[M].name) >> shift2) % C) == B"
 		# bloomfilter may be [~0]
-		if shift2
-		end
 
 		hash_bucket = [] ; hash_bucket_len.times { hash_bucket << decode_word }
 		# bucket[N] contains the lowest M for which
@@ -224,40 +222,7 @@ class ELF
 		# (gnu_hash(sym[N].name) & ~1) | (N == dynsymcount-1 || (gnu_hash(sym[N].name) % nbucket) != (gnu_hash(sym[N+1].name) % nbucket))
 		# that's the hash, with its lower bit replaced by the bool [1 if i am the last sym having my hash as hash]
 
-		# we're going to decode the symbol table, and we just want to get the nr of symbols to read
-		if just_get_count
-			# index of highest hashed (exported) symbols
-			ns = hsymcount+symndx
-
-			# no way to get the number of non-exported symbols from what we have here
-			# so we'll decode all relocs and use the largest index we see..
-			rels = []
-			if @encoded.ptr = @tag['REL'] and @tag['RELENT'] == Relocation.size(self)
-				p_end = @encoded.ptr + @tag['RELSZ']
-				while @encoded.ptr < p_end
-					rels << Relocation.decode(self)
-				end
-			end
-			if @encoded.ptr = @tag['RELA'] and @tag['RELAENT'] == RelocationAddend.size(self)
-				p_end = @encoded.ptr + @tag['RELASZ']
-				while @encoded.ptr < p_end
-					rels << RelocationAddend.decode(self)
-				end
-			end
-			if @encoded.ptr = @tag['JMPREL'] and relcls = case @tag['PLTREL']
-					when 'REL';  Relocation
-					when 'RELA'; RelocationAddend
-					end
-				p_end = @encoded.ptr + @tag['PLTRELSZ']
-				while @encoded.ptr < p_end
-					rels << relcls.decode(self)
-				end
-			end
-			maxr = rels.map { |rel| rel.symbol }.grep(::Integer).max || -1
-
-			return [ns, maxr+1].max
-		end
-
+		return hsymcount+symndx if just_get_count
 
 		# TODO
 	end
@@ -429,14 +394,12 @@ class ELF
 			raise 'Invalid symbol table' if sec.size > @encoded.length
 			(sec.size / Symbol.size(self)).times { syms << Symbol.decode(self, strtab) }
 			alreadysegs = true if @header.type == 'DYN' or @header.type == 'EXEC'
-			alreadysyms = @symbols.inject({}) { |h, s| h.update s.name => true } if alreadysegs
 			syms.each { |s|
 				if alreadysegs
 					# if we already decoded the symbols from the DYNAMIC segment,
 					# ignore dups and imports from this section
 					next if s.shndx == 'UNDEF'
-					next if alreadysyms[s.name]
-					alreadysyms[s.name] = true
+					next if @symbols.find { |ss| ss.name == s.name }
 				end
 				@symbols << s
 				decode_symbol_export(s)
@@ -547,7 +510,7 @@ class ELF
 	# returns the Metasm::Relocation that should be applied for reloc
 	# self.encoded.ptr must point to the location that will be relocated (for implicit addends)
 	def arch_decode_segments_reloc_386(reloc)
-		if reloc.symbol.kind_of?(Symbol) and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
+		if reloc.symbol and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
 			s = @sections.find { |s_| s_.name and s_.offset <= @encoded.ptr and s_.offset + s_.size > @encoded.ptr }
 			@encoded.add_export(new_label("#{s.name}_#{n}"), @encoded.ptr, true)
 		end
@@ -584,7 +547,7 @@ class ELF
 			target = Expression[:-, [target, :+, 'tlsoffset']] if reloc.type == 'TLS_TPOFF32'
 		when 'COPY'
 			# mark the address pointed as a copy of the relocation target
-			if not reloc.symbol.kind_of?(Symbol) or not name = reloc.symbol.name
+			if not reloc.symbol or not name = reloc.symbol.name
 				puts "W: Elf: symbol to COPY has no name: #{reloc.inspect}" if $VERBOSE
 				name = ''
 			end
@@ -602,7 +565,7 @@ class ELF
 	# returns the Metasm::Relocation that should be applied for reloc
 	# self.encoded.ptr must point to the location that will be relocated (for implicit addends)
 	def arch_decode_segments_reloc_mips(reloc)
-		if reloc.symbol.kind_of?(Symbol) and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
+		if reloc.symbol and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
 			s = @sections.find { |s_| s_.name and s_.offset <= @encoded.ptr and s_.offset + s_.size > @encoded.ptr }
 			@encoded.add_export(new_label("#{s.name}_#{n}"), @encoded.ptr, true)
 		end
@@ -631,7 +594,7 @@ class ELF
 	# returns the Metasm::Relocation that should be applied for reloc
 	# self.encoded.ptr must point to the location that will be relocated (for implicit addends)
 	def arch_decode_segments_reloc_x86_64(reloc)
-		if reloc.symbol.kind_of?(Symbol) and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
+		if reloc.symbol and n = reloc.symbol.name and reloc.symbol.shndx == 'UNDEF' and @sections and
 			s = @sections.find { |s_| s_.name and s_.offset <= @encoded.ptr and s_.offset + s_.size > @encoded.ptr }
 			@encoded.add_export(new_label("#{s.name}_#{n}"), @encoded.ptr, true)
 		end
@@ -669,7 +632,7 @@ class ELF
 			sz = :u32 if reloc.type == '32' or reloc.type == 'PC32'
 		when 'COPY'
 			# mark the address pointed as a copy of the relocation target
-			if not reloc.symbol.kind_of?(Symbol) or not name = reloc.symbol.name
+			if not reloc.symbol or not name = reloc.symbol.name
 				puts "W: Elf: symbol to COPY has no name: #{reloc.inspect}" if $VERBOSE
 				name = ''
 			end
@@ -784,13 +747,12 @@ class ELF
 	end
 
 	# decodes the ELF dynamic tags, interpret them, and decodes symbols and relocs
-	def decode_segments_dynamic(decode_relocs=true)
+	def decode_segments_dynamic
 		return if not dynamic = @segments.find { |s| s.type == 'DYNAMIC' }
 		@encoded.ptr = add_label('dynamic_tags', dynamic.vaddr)
 		decode_tags
 		decode_segments_tags_interpret
 		decode_segments_symbols
-		return if not decode_relocs
 		decode_segments_relocs
 		decode_segments_relocs_interpret
 	end
@@ -840,7 +802,7 @@ class ELF
 	end
 
 	def decode_exports
-		decode_segments_dynamic(false)
+		decode_segments_dynamic
 	end
 
 	# decodes the elf header, and depending on the elf type, decode segments or sections
@@ -991,16 +953,19 @@ EOC
 	end
 end
 
-class LoadedELF
+class LoadedELF < ELF
+	attr_accessor :load_address
+	def addr_to_off(addr)
+		@load_address ||= 0
+		addr >= @load_address ? addr - @load_address : addr if addr
+	end
+
 	# decodes the dynamic segment, fills segments.encoded
 	def decode_segments
-		if @load_address == 0 and @segments.find { |s| s.type == 'LOAD' and s.vaddr > @encoded.length }
-			@load_address = @segments.find_all { |s| s.type == 'LOAD' }.map { |s| s.vaddr }.min
-		end
 		decode_segments_dynamic
 		@segments.each { |s|
 			if s.type == 'LOAD'
-				s.encoded = @encoded[addr_to_off(s.vaddr), s.memsz]
+				s.encoded = @encoded[s.vaddr, s.memsz]
 			end
 		}
 	end

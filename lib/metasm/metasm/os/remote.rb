@@ -5,7 +5,6 @@
 
 
 require 'metasm/os/main'
-require 'metasm/debug'
 require 'socket'
 
 module Metasm
@@ -392,51 +391,15 @@ end
 class GdbRemoteDebugger < Debugger
 	attr_accessor :gdb, :check_target_timeout
 	def initialize(url, cpu='Ia32')
-		super()
-		@tid_stuff_list << :reg_val_cache << :regs_dirty
 		@gdb = GdbClient.new(url, cpu)
 		@gdb.logger = self
-		# when checking target, if no message seen since this much seconds, send a 'status' query
-		@check_target_timeout = 1
-		set_context(28, 28)
-	end
-
-	def check_pid(pid)
-		# return nil if pid == nil
-		pid
-	end
-	def check_tid(tid)
-		tid
-	end
-
-	def list_processes
-		[@pid].compact
-	end
-	def list_threads
-		[@tid].compact
-	end
-
-	def mappings
-		[]
-	end
-
-	def modules
-		[]
-	end
-
-
-	def initialize_newtid
-		super()
+		@cpu = @gdb.cpu
+		@memory = GdbRemoteString.new(@gdb)
 		@reg_val_cache = {}
 		@regs_dirty = false
-	end
-
-	def initialize_cpu
-		@cpu = @gdb.cpu
-	end
-
-	def initialize_memory
-		@memory = GdbRemoteString.new(@gdb)
+		# when checking target, if no message seen since this much seconds, send a 'status' query
+		@check_target_timeout = 1
+		super()
 	end
 
 	def invalidate
@@ -470,38 +433,30 @@ class GdbRemoteDebugger < Debugger
 			@last_check_target = t
 		end
 		return unless i = @gdb.check_target(0.01)
-		update_state(i)
+		invalidate if i[:state] == :stopped and @state != :stopped
+		@state, @info = i[:state], i[:info]
+		@info = nil if @info =~ /TRAP/
 	end
 
 	def do_wait_target
 		return unless i = @gdb.check_target(nil)
-		update_state(i)
-	end
-
-	def update_state(i)
-		@info = (i[:info] if i[:info] !~ /TRAP/)
-		if i[:state] == :stopped and @state != :stopped
-			invalidate
-			@state = i[:state]
-			case @run_method
-			when :singlestep
-				evt_singlestep
-			else
-				evt_bpx	# XXX evt_hwbp?
-			end
-		else
-			@state = i[:state]
-		end
+		invalidate if i[:state] == :stopped and @state != :stopped
+		@state, @info = i[:state], i[:info]
+		@info = nil if @info =~ /TRAP/
 	end
 
 	def do_continue(*a)
+		return if @state != :stopped
 		@state = :running
+		@info = 'continue'
 		@gdb.continue
 		@last_check_target = Time.now
 	end
 
 	def do_singlestep(*a)
+		return if @state != :stopped
 		@state = :running
+		@info = 'singlestep'
 		@gdb.singlestep
 		@last_check_target = Time.now
 	end
@@ -512,52 +467,53 @@ class GdbRemoteDebugger < Debugger
 
 	def kill(sig=nil)
 		# TODO signal nr
-		@state = :dead
 		@gdb.kill
+		@state = :dead
+		@info = 'killed'
 	end
 
 	def detach
-		del_all_breakpoints
-		del_pid
+		super()	# remove breakpoints & stuff
+		@gdb.detach
+		@state = :dead
+		@info = 'detached'
 	end
 	
-	# set to true to use the gdb msg to handle bpx, false to set 0xcc manually ourself
+	# set to true to use the gdb msg to handle bpx, false to set 0xcc ourself
 	attr_accessor :gdb_bpx
-	def do_enable_bp(b)
+	def enable_bp(addr)
+		return if not b = @breakpoint[addr]
+		b.state = :active
 		case b.type
-		when :bpm
-			do_enable_bpm(b)
 		when :bpx
 			if gdb_bpx
-				@gdb.set_hwbp('s', b.address, 1)
+				@gdb.set_hwbp('s', addr, 1)
 			else
-				@cpu.dbg_enable_bp(self, b)
+				@cpu.dbg_enable_bp(self, addr, b)
 			end
 		when :hw
-			@gdb.set_hwbp(b.internal[:type], b.address, b.internal[:len])
+			@gdb.set_hwbp(b.mtype, addr, b.mlen)
 		end
 	end
 
-	def do_disable_bp(b)
+	def disable_bp(addr)
+		return if not b = @breakpoint[addr]
+		b.state = :inactive
 		case b.type
-		when :bpm
-			do_disable_bpm(b)
 		when :bpx
 			if gdb_bpx
-				@gdb.unset_hwbp('s', b.address, 1)
+				@gdb.unset_hwbp('s', addr, 1)
 			else
-				@cpu.dbg_disable_bp(self, b)
+				@cpu.dbg_disable_bp(self, addr, b)
 			end
 		when :hw
-			@gdb.unset_hwbp(b.internal[:type], b.address, b.internal[:len])
+			@gdb.unset_hwbp(b.mtype, addr, b.mlen)
 		end
 	end
 
 	def check_pre_run(*a)
-		if ret = super(*a)
-			sync_regs
-			ret
-		end
+		sync_regs
+		super(*a)
 	end
 
 	def loadallsyms

@@ -14,17 +14,15 @@ class CStructWidget < DrawableWidget
 
 		@line_text_col = []	# each line is [[:col, 'text'], [:col, 'text']]
 		@line_text = []
-		@line_dereference = []	# linenr => [addr, struct] (args to focus_addr)
 		@curaddr = nil
 		@curstruct = nil
 		@tabwidth = 8
 		@view_x = @view_y = 0
 		@caret_x = @caret_y = 0
 		@cwidth = @cheight = 1	# widget size in chars
-		@structdepth = 2
 
 		@default_color_association = { :text => :black, :keyword => :blue, :caret => :black,
-			  :background => :white, :hl_word => :palered, :comment => :darkblue }
+			  :background => :white, :hl_word => :palered }
 	end
 
 	def click(x, y)
@@ -40,7 +38,7 @@ class CStructWidget < DrawableWidget
 
 	def doubleclick(x, y)
 		click(x, y)
-		keypress(:enter)
+		@parent_widget.focus_addr(@hl_word)
 	end
 
 	def mouse_wheel(dir, x, y)
@@ -48,7 +46,6 @@ class CStructWidget < DrawableWidget
 		when :up
 			if @caret_y > 0
 				@view_y -= 4
-				@view_y = 0 if @view_y < 0
 				@caret_y -= 4
 				@caret_y = 0 if @caret_y < 0
 			end
@@ -56,6 +53,7 @@ class CStructWidget < DrawableWidget
 			if @caret_y < @line_text.length - 1
 				@view_y += 4
 				@caret_y += 4
+				redraw
 			end
 		end
 		redraw
@@ -82,6 +80,26 @@ class CStructWidget < DrawableWidget
 		x = 1
 		y = 0
 
+		# renders a string at current cursor position with a color
+		# must not include newline
+		render = lambda { |str, color|
+			# function ends when we write under the bottom of the listing
+			if @hl_word
+				stmp = str
+				pre_x = 0
+				while stmp =~ /^(.*?)(\b#{Regexp.escape @hl_word}\b)/
+					s1, s2 = $1, $2
+					pre_x += s1.length*@font_width
+					hl_w = s2.length*@font_width
+					draw_rectangle_color(:hl_word, x+pre_x, y, hl_w, @font_height)
+					pre_x += hl_w
+					stmp = stmp[s1.length+s2.length..-1]
+				end
+			end
+			draw_string_color(color, x, y, str)
+			x += str.length * @font_width
+		}
+
 		@line_text_col[@view_y, @cheight + 1].each { |l|
 			cx = 0
 			l.each { |c, t|
@@ -90,20 +108,7 @@ class CStructWidget < DrawableWidget
 				elsif cx < @view_x
 				else
 					t = t[(@view_x - cx + t.length)..-1] if cx-t.length < @view_x
-					if @hl_word
-						stmp = t
-						pre_x = 0
-						while stmp =~ @hl_word_re
-							s1, s2 = $1, $2
-							pre_x += s1.length*@font_width
-							hl_w = s2.length*@font_width
-							draw_rectangle_color(:hl_word, x+pre_x, y, hl_w, @font_height)
-							pre_x += hl_w
-							stmp = stmp[s1.length+s2.length..-1]
-						end
-					end
-					draw_string_color(c, x, y, t)
-					x += t.length * @font_width
+					render[t, c]
 				end
 			}
 			x = 1
@@ -148,123 +153,96 @@ class CStructWidget < DrawableWidget
 		when :end
 			@caret_x = @line_text[@caret_y].to_s.length
 			update_caret
-		when :pgup
-			@caret_y -= @cheight/2
-			@caret_y = 0 if @caret_y < 0
-			update_caret
-		when :pgdown
-			@caret_y += @cheight/2
-			@caret_y = @line_text.length if @caret_y > @line_text.length
-			update_caret
-		when :enter
-			if l = @line_dereference[@caret_y]
-				if @parent_widget
-					@parent_widget.focus_addr(l[0], :cstruct, false, l[1])
-				else
-					focus_addr(l[0], l[1])
-				end
+		when ?t	# change current struct type
+			f = curfunc.initializer if curfunc.kind_of? C::Variable and curfunc.initializer.kind_of? C::Block
+			n = @hl_word
+			cp = @dasm.c_parser
+			if (f and s = f.symbol[n]) or s = cp.toplevel.symbol[n] or s = cp.toplevel.symbol[@curaddr]
+				s_ = s.dup
+				s_.initializer = nil if s.kind_of? C::Variable	# for static var, avoid dumping the initializer in the textbox
+				s_.attributes &= C::Attributes::DECLSPECS if s_.attributes
+				@parent_widget.inputbox("new type for #{s.name}", :text => s_.dump_def(cp.toplevel)[0].join(' ')) { |t|
+					if t == ''
+						if s.type.kind_of? C::Function and s.initializer and s.initializer.decompdata
+							s.initializer.decompdata[:stackoff_type].clear
+							s.initializer.decompdata.delete :return_type
+						elsif s.kind_of? C::Variable and s.stackoff
+							f.decompdata[:stackoff_type].delete s.stackoff
+						end
+						next
+					end
+					begin
+						cp.lexer.feed(t)
+						raise 'bad type' if not v = C::Variable.parse_type(cp, cp.toplevel, true)
+						v.parse_declarator(cp, cp.toplevel)
+						if s.type.kind_of? C::Function and s.initializer and s.initializer.decompdata
+							# updated type of a decompiled func: update stack
+							vt = v.type.untypedef
+							vt = vt.type.untypedef if vt.kind_of? C::Pointer
+							raise 'function forever !' if not vt.kind_of? C::Function
+							# TODO _declspec
+							ao = 1
+							vt.args.to_a.each { |a|
+								next if a.has_attribute_var('register')
+								ao = (ao + [cp.sizeof(a), cp.typesize[:ptr]].max - 1) / cp.typesize[:ptr] * cp.typesize[:ptr]
+								s.initializer.decompdata[:stackoff_name][ao] = a.name if a.name
+								s.initializer.decompdata[:stackoff_type][ao] = a.type
+								ao += cp.sizeof(a)
+							}
+							s.initializer.decompdata[:return_type] = vt.type
+							s.type = v.type
+						else
+							f.decompdata[:stackoff_type][s.stackoff] = v.type if f and s.kind_of? C::Variable and s.stackoff
+							s.type = v.type
+						end
+						gui_update
+					rescue Object
+						@parent_widget.messagebox([$!.message, $!.backtrace].join("\n"), "error")
+					end
+					cp.readtok until cp.eos?
+				}
 			end
-		when ?+
-			@structdepth += 1
-			gui_update
-		when ?-
-			@structdepth -= 1
-			gui_update
-		when ?/
-			@structdepth = 1
-			gui_update
-		when ?*
-			@structdepth =  50
-			gui_update
-		when ?l
-			liststructs
-		when ?t
-			inputbox('new struct name to use', :text => (@curstruct.name rescue '')) { |n| focus_struct_byname(n) }
+		when ?T
+			list = [['name']]
+			list += @dasm.c_parser.toplevel.struct.keys.grep(String).sort.map { |stn| [stn] }
+			listwindow('structs', list) { |stn|
+				focus_addr(@curaddr, @dasm.c_parser.toplevel.struct[stn[0]] || @curstruct)
+			}
 		else return false
 		end
 		true
 	end
 
-	# display the struct or pop a list of matching struct names if ambiguous
-	def focus_struct_byname(n, addr=@curaddr)
-		lst = @dasm.c_parser.toplevel.struct.keys.grep(String)
-		if fn = lst.find { |ln| ln == n } || lst.find { |ln| ln.downcase == n.downcase }
-			focus_addr(addr, @dasm.c_parser.toplevel.struct[fn])
-		else
-			lst = @dasm.c_parser.toplevel.symbol.keys.grep(String).find_all { |ln|
-				s = @dasm.c_parser.toplevel.symbol[ln]
-				s.kind_of?(C::TypeDef) and s.untypedef.kind_of?(C::Union)
-			}
-			if fn = lst.find { |ln| ln == n } || lst.find { |ln| ln.downcase == n.downcase }
-				focus_addr(addr, @dasm.c_parser.toplevel.symbol[fn].untypedef)
-			else
-				liststructs(n, addr)
-			end
-		end
-	end
-
-	def liststructs(partname=nil, addr=@curaddr)
-		tl = @dasm.c_parser.toplevel
-		list = [['name', 'size']]
-		list += tl.struct.keys.grep(String).sort.map { |stn|
-			next if partname and stn !~ /#{partname}/i
-			st = tl.struct[stn]
-			[stn, @dasm.c_parser.sizeof(st)] if st.members
-		}.compact
-		list += tl.symbol.keys.grep(String).sort.map { |stn|
-			next if partname and stn !~ /#{partname}/i
-			st = tl.symbol[stn]
-			next unless st.kind_of?(C::TypeDef) and st.untypedef.kind_of?(C::Union)
-			[stn, @dasm.c_parser.sizeof(st)] if st.untypedef.members
-		}.compact
-
-		if partname and list.length == 2
-			focus_addr(addr, tl.struct[list[1][0]] || tl.symbol[list[1][0]].untypedef)
-			return
-		end
-
-		listwindow('structs', list) { |stn|
-			focus_addr(addr, tl.struct[stn[0]] || tl.symbol[stn[0]].untypedef)
-		}
-	end
-
 	def get_cursor_pos
-		[@curaddr, @curstruct, @caret_x, @caret_y, @view_y]
+		[@curaddr, @curstruct, @caret_x, @caret_y]
 	end
 
 	def set_cursor_pos(p)
 		focus_addr p[0], p[1]
-		@caret_x, @caret_y, @view_y = p[2, 3]
+		@caret_x, @caret_y = p[2, 2]
 		update_caret
 	end
 
 	# hint that the caret moved
 	# redraws the caret, change the hilighted word, redraw if needed
 	def update_caret
-		if @caret_x < @view_x or @caret_x >= @view_x + @cwidth or @caret_y < @view_y or @caret_y >= @view_y + @cheight
-			redraw
-		elsif update_hl_word(@line_text[@caret_y], @caret_x, :c)
-			redraw
-		else
-			invalidate_caret(@oldcaret_x-@view_x, @oldcaret_y-@view_y)
-			invalidate_caret(@caret_x-@view_x, @caret_y-@view_y)
-		end
+		redraw if @caret_x < @view_x or @caret_x >= @view_x + @cwidth or @caret_y < @view_y or @caret_y >= @view_y + @cheight
+
+		invalidate_caret(@oldcaret_x-@view_x, @oldcaret_y-@view_y)
+		invalidate_caret(@caret_x-@view_x, @caret_y-@view_y)
 		@oldcaret_x, @oldcaret_y = @caret_x, @caret_y
+
+		redraw if update_hl_word(@line_text[@caret_y], @caret_x)
 	end
 
 	# focus on addr
-	# returns true on success
+	# returns true on success (address exists & decompiled)
 	def focus_addr(addr, struct=@curstruct)
-		return if @parent_widget and not addr = @parent_widget.normalize(addr)
+		return if not addr = @parent_widget.normalize(addr)
 		@curaddr = addr
+		@curstruct = struct
 		@caret_x = @caret_y = 0
-		if struct.kind_of? String
-			@curstruct = nil
-			focus_struct_byname(struct)
-		else
-			@curstruct = struct
-			gui_update
-		end
+		gui_update
 		true
 	end
 
@@ -273,103 +251,30 @@ class CStructWidget < DrawableWidget
 		@curaddr
 	end
 
-	def render_struct(obj=nil, off=nil, maxdepth=@structdepth)
-		render = lambda { |str, col|
-			if @line_text_col.last[0] == col
-				@line_text_col.last[1] << str
-			else
-				@line_text_col.last << [col, str]
-			end
-		}
-		indent = ' ' * @tabwidth
-		nl = lambda {
-			@line_text_col << []
-			render[indent * [@structdepth - maxdepth, 0].max, :text]
-		}
-		
-		if not obj
-			@line_text_col = [[]]
-			@line_dereference = []
+	def render_struct
+		@line_text_col = [[]]
+		render = lambda { |str, col| @line_text_col.last << [col, str] }
+		nl = lambda { @line_text_col << [] }
 
-			struct = @curstruct
-			if str = @dasm.get_section_at(@curaddr)
-				obj = @dasm.c_parser.decode_c_struct(struct, str[0].read(@dasm.c_parser.sizeof(struct)))
-			else
-				render["/* unmapped area #{Expression[@curaddr]} */", :text]
-				return
-			end
-		else
-			struct = obj.struct
-		end
-
-		if maxdepth <= 0
-			render['{ /* type "+" to expand */ }', :text]
-			return
-		end
-
-		# from AllocCStruct#to_s
-		if struct.kind_of?(C::Array)
-			render["#{struct.type} ar_#{Expression[@curaddr]}[#{struct.length}] = ", :text] if not off
-			mlist = (0...struct.length)
-			el = @dasm.c_parser.sizeof(struct.type)
-			fldoff = mlist.inject({}) { |h, i| h.update i => i*el }
-		elsif struct.kind_of?(C::Struct)
-			render["struct #{struct.name || '_'} st_#{Expression[@curaddr]} = ", :text] if not off
-			fldoff = struct.fldoffset
-			fbo = struct.fldbitoffset || {}
-		else
-			render["union #{struct.name || '_'} un_#{Expression[@curaddr]} = ", :text] if not off
-		end
-		mlist ||= struct.members
-		render['{', :text]
-		mlist.each { |k|
-			if k.kind_of? C::Variable
-				ct = k.type
-				curoff = off.to_i + (fldoff && k.name ? fldoff[k.name].to_i : struct.offsetof(@dasm.c_parser, k))
-				val = obj[k]
-			else
-				ct = struct.type
-				curoff = off.to_i + fldoff[k].to_i
-				val = obj[k]
-			end
-			nl[]
-			render[indent, :text]
-			render[k.kind_of?(Integer) ? "[#{k}]" : ".#{k.name || '?'}", :text]
-			render[' = ', :text]
-			if val.kind_of?(Integer)
-				if ct.pointer? and ct.pointed.untypedef.kind_of?(C::Union)
-					@line_dereference[@line_text_col.length-1] = [val, ct.pointed.untypedef]
-				end
-				if val >= 0x100
-					val = '0x%X' % val
-				elsif val <= -0x100
-					val = '-0x%X' % -val
-				else
-					val = val.to_s
-				end
-			elsif val.kind_of?(C::AllocCStruct)
-				render_struct(val, curoff, maxdepth-1)
-				next
-			elsif not val
-				val = 'NULL' # pointer with NULL value
-			else
-				raise "unknown value #{val.inspect}"
-			end
-			render[val, :text]
-			render[',', :text]
-			render['   // +%x' % curoff, :comment]
-		}
+		render["#{@curstruct.kind_of?(C::Struct) ? 'struct' : 'union' } #{@curstruct.name || ''} {", :text]
 		nl[]
-		render['}', :text]
-		render[(off ? ',' : ';'), :text]
+		sect = @dasm.get_section_at(@curaddr)
+		sect = sect[0] if sect
+		@curstruct.members.each { |m|
+			render[' '*@tabwidth + m.type.to_s[1..-2].to_s + ' ' + (m.name || '') + ';', :text]
+			raw = sect.read(@dasm.c_parser.sizeof(m))
+			render['   // ' + Expression[@dasm.c_parser.decode_value(m.type, raw, :text)]] if sect and m.type.kind_of? C::BaseType
+			sect.ptr -= raw.size if not @curstruct.kind_of?(C::Struct)
+			nl[]
+		}
+		render['};', :text]
 	end
-
 
 	def gui_update
 		if @curstruct
 			render_struct
 		else
-			@line_text_col = [[[:text, '/* no struct selected (list with "l") */']]]
+			@line_text_col = [[[:text, 'no struct selected']]]
 		end
 		
 		@line_text = @line_text_col.map { |l| l.map { |c, s| s }.join }

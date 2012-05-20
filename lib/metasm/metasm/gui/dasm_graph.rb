@@ -22,7 +22,13 @@ class Graph
 		#def inspect ; puts caller ; "#{Expression[@id] rescue @id.inspect}" end
 	end
 
-	attr_accessor :id, :box, :box_id, :root_addrs, :view_x, :view_y, :keep_split
+	# TODO
+	class MergedBox
+		attr_accessor :id, :text, :x, :y, :w, :h
+		attr_accessor :to, :from
+	end
+
+	attr_accessor :id, :box, :root_addrs, :view_x, :view_y, :keep_split
 	def initialize(id)
 		@id = id
 		@root_addrs = []
@@ -33,349 +39,28 @@ class Graph
 	# empty @box
 	def clear
 		@box = []
-		@box_id = {}
 	end
 
 	# link the two boxes (by id)
 	def link_boxes(id1, id2)
-		raise "unknown index 1 #{id1}" if not b1 = @box_id[id1]
-		raise "unknown index 2 #{id2}" if not b2 = @box_id[id2]
+		raise "unknown index 1 #{id1}" if not b1 = @box.find { |b| b.id == id1 }
+		raise "unknown index 2 #{id2}" if not b2 = @box.find { |b| b.id == id2 }
 		b1.to   |= [b2]
 		b2.from |= [b1]
 	end
 
 	# creates a new box, ensures id is not already taken
 	def new_box(id, content=nil)
-		raise "duplicate id #{id}" if @box_id[id]
+		raise "duplicate id #{id}" if @box.find { |b| b.id == id }
 		b = Box.new(id, content)
 		@box << b
-		@box_id[id] = b
 		b
-	end
-
-	# returns the [x1, y1, x2, y2] of the rectangle encompassing all boxes
-	def boundingbox
-		minx = @box.map { |b| b.x }.min.to_i
-		miny = @box.map { |b| b.y }.min.to_i
-		maxx = @box.map { |b| b.x + b.w }.max.to_i
-		maxy = @box.map { |b| b.y + b.h }.max.to_i
-		[minx, miny, maxx, maxy]
-	end
-
-	# position known box patterns recursively (lines, columns, if/end)
-	def pattern_layout
-		nil while pattern_layout_col or pattern_layout_line or pattern_layout_ifend
-	end
-
-	# a -> b -> c -> d (no other in/outs)
-	def pattern_layout_col
-		# find head
-		return if not head = @groups.find { |g|
-			g.to.length == 1 and
-			g.to[0].from.length == 1 and
-			(g.from.length != 1 or g.from[0].to.length != 1)
-		}
-
-		# find full sequence
-		ar = [head]
-		while head.to.length == 1 and head.to[0].from.length == 1
-			head = head.to[0]
-			ar << head
-		end
-
-		# move boxes inside this group
-		maxw = ar.map { |g| g.w }.max
-		if ar.last.to.include? ar.first
-			# ar is a loop: shift whole array to
-			#  make place for the arrow going up
-			maxw += 20
-			dx = 10
-		else dx = 0
-		end
-		fullh = ar.inject(0) { |h, g| h + g.h }
-		cury = -fullh/2
-		ar.each { |g|
-			dy = cury - g.y
-			g.content.each { |b| b.x += dx ; b.y += dy }
-			cury += g.h
-		}
-
-		# create remplacement group
-		newg = Box.new(nil, ar.map { |g| g.content }.flatten)
-		newg.w = maxw
-		newg.h = fullh
-		newg.x = -newg.w/2
-		newg.y = -newg.h/2
-		newg.from = ar.first.from - ar
-		newg.to = ar.last.to - ar
-		# fix xrefs
-		newg.from.each { |g| g.to -= ar ; g.to << newg }
-		newg.to.each { |g| g.from -= ar ; g.from << newg }
-		# fix @groups
-		@groups[@groups.index(head)] = newg
-		@groups -= ar
-
-		true
-	end
-
-	# a -> [b, c, d] -> e
-	def pattern_layout_line
-		# find head
-		ar = []
-		@groups.each { |g|
-			if g.from.length == 1 and g.to.length <= 1 and g.from.first.to.length > 1
-				ar = g.from.first.to.find_all { |gg| gg.from == g.from and gg.to == g.to }
-			elsif g.from.empty? and g.to.length == 1 and g.to.first.from.length > 1
-				ar = g.to.first.from.find_all { |gg| gg.from == g.from and gg.to == g.to }
-			else ar = []
-			end
-			break if ar.length > 1
-		}
-		return if ar.length <= 1
-
-		# move boxes inside this group
-		ar = ar.sort_by { |g| -g.h }
-		maxh = ar.last.h
-		fullw = ar.inject(0) { |w, g| w + g.w }
-		curx = -fullw/2
-		ar.each { |g|
-			# if no to, put all boxes at bottom ; if no from, put them at top
-			case [g.from.length, g.to.length]
-			when [1, 0]; dy = (g.h - maxh)/2
-			when [0, 1]; dy = (maxh - g.h)/2
-			else dy = 0
-			end
-
-			dx = curx - g.x
-			g.content.each { |b| b.x += dx ; b.y += dy }
-			curx += g.w
-		}
-		# add a 'margin-top' proportionnal to the ar width
-		# this gap should be relative to the real boxes and not possible previous gaps when
-		# merging lines (eg long line + many if patterns -> dont duplicate gaps)
-		boxen = ar.map { |g| g.content }.flatten
-		realh = boxen.map { |g| g.y + g.h }.max - boxen.map { |g| g.y }.min
-		if maxh < realh + fullw/4
-			maxh = realh + fullw/4
-		end
-
-		# create remplacement group
-		newg = Box.new(nil, ar.map { |g| g.content }.flatten)
-		newg.w = fullw
-		newg.h = maxh
-		newg.x = -newg.w/2
-		newg.y = -newg.h/2
-		newg.from = ar.first.from
-		newg.to = ar.first.to
-		# fix xrefs
-		newg.from.each { |g| g.to -= ar ; g.to << newg }
-		newg.to.each { |g| g.from -= ar ; g.from << newg }
-		# fix @groups
-		@groups[@groups.index(ar.first)] = newg
-		@groups -= ar
-
-		true
-	end
-
-	# a -> b -> c & a -> c
-	def pattern_layout_ifend
-		# find head
-		return if not head = @groups.find { |g|
-			g.to.length == 2 and
-			((g.to[0].to.length == 1 and g.to[0].to[0] == g.to[1] and g.to[0].from.length == 1) or
-			 (g.to[1].to.length == 1 and g.to[1].to[0] == g.to[0] and g.to[1].from.length == 1))
-		}
-
-		if head.to[0].from.length == 1
-			ten = head.to[0]
-		else
-			ten = head.to[1]
-		end
-
-		# stuff 'then' inside the 'if'
-		# move 'if' up, 'then' down
-		head.content.each { |g| g.y -= ten.h/2 }
-		ten.content.each { |g| g.y += head.h/2 }
-		head.h += ten.h
-		head.y -= ten.h/2
-
-		# widen 'if'
-		dw = 2*ten.w - head.w
-		if dw > 0
-			# need to widen head to fit ten
-			head.w += dw
-			head.x -= dw/2
-		end
-
-		# merge
-		ten.content.each { |g| g.x += -ten.x }
-		head.content.concat ten.content
-		head.to.delete ten
-		head.to[0].from.delete ten
-
-		# XXX now head is too wide on the left side
-
-		@groups.delete ten
-
-		true
-
-	end
-
-	# find the minimal set of nodes from which we can reach all others
-	# this is done *before* removing cycles in the graph
-	# stored as having an order of 0
-	def find_roots
-		roots = @groups.find_all { |g| g.from.empty? }
-		roots << @groups.first if roots.empty? and @groups.first
-		# tentative @order
-		o = {}
-		todo = []
-		roots.each { |g|
-			o[g] = 0
-			todo |= g.to
-		}
-		loop do
-			# order nodes from the tentative roots
-			while n = todo.find { |g| g.from.all? { |gg| o[gg] } } ||
-				  todo.sort_by { |g| g.from.map { |gg| o[gg] }.compact.max }.first	# cycle heads
-				todo.delete n
-				o[n] = n.from.map { |g| o[g] }.compact.max + 1
-				todo |= n.to.find_all { |g| not o[g] }
-			end
-			# todo empty at this point
-			break if o.length >= @groups.length
-
-			if rt = roots.find { |g| g.from.find { |gg| not o[gg] } } ||
-					@groups.find_all { |g| o[g] and g.from.find { |gg| not o[gg] } }.sort_by { |g| o[g] }.first
-				# if we picked a root in the middle of the graph, try to go up
-				utodo = rt.from.find_all { |g| not o[g] }
-				while n = utodo.find { |g| g.to.all? { |gg| o[gg] } } ||
-					  utodo.sort_by { |g| g.to.map { |gg| o[gg] }.compact.min }.first
-					utodo.delete n
-					o[n] = n.to.map { |g| o[g] }.compact.min - 1
-					utodo |= n.from.find_all { |g| not o[g] }
-					todo |= n.to.find_all { |g| not o[g] }
-				end
-				# setup todo for next fwd iteration
-				todo = todo.find_all { |g| g.from.find { |gg| o[gg] } }
-			else
-				# disjoint graph, start over from there
-				roots = [@groups.find { |g| not o[g] }]
-				roots.each { |g|
-					o[g] = 0
-					todo |= g.to.find_all { |gg| not o[gg] }
-				}
-			end
-		end
-
-		# now all nodes have a relative order, which may be negative
-		# extract real roots from that (root iff no from with lower order)
-		roots = @groups.find_all { |g| not g.from.find { |gg| o[gg] < o[g] } }
-		# recompute real order from these roots
-		@order = {}
-		todo = []
-		roots.each { |g|
-			@order[g] = 0
-			todo |= g.to
-		}
-		todo -= roots
-		until todo.empty?
-			if not n = todo.find { |g| g.from.all? { |gg| @order[gg] } }
-				# try to find cycle heads, starting from highest order parent
-				# take additionnal steps to avoid selecting a top node that should be
-				# child of some other loop
-				# eg 1 -> 4 ; 1 -> 2 -> <cycle> -> 4  => start with the cycle, and not 4
-				cheads = todo.sort_by { |g| g.from.map { |gg| @order[gg] }.compact.max || @groups.length }
-				n = cheads.first
-				cheads.each_with_index { |g, i|
-					next if cheads[i+1..-1].find { |gg|
-						can_find_path(gg, g) and not can_find_path(g, gg)
-					}
-					n = g
-					break
-				}
-			end
-			todo.delete n
-			@order[n] = n.from.map { |g| @order[g] }.compact.max + 1
-			todo |= n.to.find_all { |g| not @order[g] }
-		end
-		raise if @order.length != @groups.length
-	end
-
-	# checks if there is a path from src to dst
-	def can_find_path(src, dst)
-		todo = [src]
-		done = {}
-		while g = todo.pop
-			return true if g == dst
-			todo.concat g.to unless done[g]
-			done[g] = true
-		end
-	end
-
-	# remove looping edges from @groups, order the boxes in layers, find the roots of the graph, create dummy groups along long edges
-	def maketree
-		find_roots
-
-		# now we have the roots and node orders
-		#  revert cycling edges - o(chld) < o(parent)
-		#  expand long edges    - o(chld) > o(parent)+1
-		newemptybox = lambda { b = Box.new(nil, []) ; b.x = -8 ; b.y = -9 ; b.w = 16 ; b.h = 18 ; @groups << b ; b }
-		newboxo = {}
-		@order.each_key { |g|
-			og = @order[g] || newboxo[g]
-			g.to.dup.each { |gg|
-				ogg = @order[gg] || newboxo[gg]
-				if ogg < og
-					# cycling edge, revert & may expand
-					sq = [gg]
-					if ogg < og-1
-						(og - 1 - ogg).times { |i| sq << newemptybox[] }
-					end
-					sq << g
-					g.from.delete gg
-					gg.to.delete g
-					newboxo[gg] ||= @order[gg]
-					sq.inject { |g1, g2|
-						g1.to |= [g2]
-						g2.from |= [g1]
-						# need separate hash to avoid updating @order in its #each_key
-						newboxo[g2] = newboxo[g1]+1
-						g2
-					}
-					raise if newboxo[g] != og
-				elsif ogg > og+1
-					# long edge, expand
-					sq = [g]
-					(ogg - 1 - og).times { |i| sq << newemptybox[] }
-					sq << gg
-					gg.from.delete g
-					g.to.delete gg
-					newboxo[g] ||= @order[g]
-					sq.inject { |g1, g2|
-						g1.to |= [g2]
-						g2.from |= [g1]
-						newboxo[g2] = newboxo[g1]+1
-						g2
-					}
-					raise if newboxo[gg] != ogg
-				end
-			}
-		}
-		@order.update newboxo
-
-		# @layers[o] = [list of nodes of order o]
-		@layers = []
-		@groups.each { |g|
-			(@layers[@order[g]] ||= []) << g
-		}
 	end
 
 	# place boxes in a good-looking layout
 	def auto_arrange_init(list=@box)
 		# groups is an array of box groups
 		# all groups are centered on the origin
-		h = {}	# { group => box }
 		@groups = list.map { |b|
 			b.x = -b.w/2
 			b.y = -b.h/2
@@ -384,7 +69,6 @@ class Graph
 			g.y = b.y - 9
 			g.w = b.w + 16
 			g.h = b.h + 18
-			h[b] = g
 			g
 		}
 
@@ -393,153 +77,387 @@ class Graph
 		# no self references
 		# a box is in one and only one group in 'groups'
 		@groups.each { |g|
-			g.to   = g.content.first.to.map   { |t| h[t] if t != g }.compact
-			g.from = g.content.first.from.map { |f| h[f] if f != g }.compact
+			g.to   = g.content.first.to.map   { |t| next if not t = list.index(t) ; @groups[t] }.compact - [g]
+			g.from = g.content.first.from.map { |f| next if not f = list.index(f) ; @groups[f] }.compact - [g]
 		}
 
-		pattern_layout
-
-		maketree
-		return if @layers.empty?
-
-		# TODO layout disjoint graphs distinctly ?
-
-		# widest layer width
-		maxlw = @layers.map { |l| l.inject(0) { |ll, g| ll + g.w } }.max
-
-		# center the 1st layer boxes on a segment that large
-		x0 = -maxlw/2.0
-		curlw = @layers[0].inject(0) { |ll, g| ll + g.w }
-		dx0 = (maxlw - curlw) / (2.0*@layers[0].length)
-		@layers[0].each { |g|
-			x0 += dx0
-			g.x = x0
-			x0 += g.w + dx0
-		}
-	end
-
-	def auto_arrange_step
-		return if @layers.empty?
-
-		# at this point, the goal is to reorder the most populated layer the best we can, and
-		# move other layers' boxes accordingly
-
-		maxlw = @layers.map { |l| l.inject(0) { |ll, g| ll + g.w } }.max
-		@layers[1..-1].each { |l|
-			# for each subsequent layer, reorder boxes based on their ties with the previous layer
-			i = 0
-			l.replace l.sort_by { |g|
-				# we know g.from is not empty (g would be in @layer[0])
-				medfrom = g.from.inject(0.0) { |mx, gg| mx + (gg.x + gg.w/2.0) } / g.from.length
-				# on ties, keep original order
-				[medfrom, i]
-			}
-			# now they are reordered, update their #x accordingly
-			# evenly distribute them in the layer
-			x0 = -maxlw/2.0
-			curlw = l.inject(0) { |ll, g| ll + g.w }
-			dx0 = (maxlw - curlw) / (2.0*l.length)
-			l.each { |g|
-				x0 += dx0
-				g.x = x0
-				x0 += g.w + dx0
-			}
-		}
-
-		@layers[0...-1].reverse_each { |l|
-			# for each subsequent layer, reorder boxes based on their ties with the previous layer
-			i = 0
-			l.replace l.sort_by { |g|
-				if g.to.empty?
-					# TODO floating end
-					medfrom = 0
-				else
-					medfrom = g.to.inject(0.0) { |mx, gg| mx + (gg.x + gg.w/2.0) } / g.to.length
-				end
-				# on ties, keep original order
-				[medfrom, i]
-			}
-			# now they are reordered, update their #x accordingly
-			x0 = -maxlw/2.0
-			curlw = l.inject(0) { |ll, g| ll + g.w }
-			dx0 = (maxlw - curlw) / (2.0*l.length)
-			l.each { |g|
-				x0 += dx0
-				g.x = x0
-				x0 += g.w + dx0
-			}
-		}
-
-		# now the boxes are (hopefully) sorted correctly
-		# position them according to their ties with prev/next layer
-		# from the maxw layer (positionning = packed), propagate adjacent layers positions
-		maxidx = (0..@layers.length).find { |i| l = @layers[i] ; l.inject(0) { |ll, g| ll + g.w } == maxlw }
-		# list of layer indexes to walk
-		ilist = []
-		ilist.concat((maxidx+1...@layers.length).to_a) if maxidx < @layers.length-1
-		ilist.concat((0..maxidx-1).to_a.reverse) if maxidx > 0
-		ilist.each { |i|
-			l = @layers[i]
-			curlw = l.inject(0) { |ll, g| ll + g.w }
-			# left/rightmost acceptable position for the current box w/o overflowing on the right side
-			minx = -maxlw/2.0
-			maxx = minx + (maxlw-curlw)
-			l.each { |g|
-				ref = (i < maxidx) ? g.to : g.from
-				# TODO elastic positionning around the ideal position
-				# (g and g+1 may have the same med, then center both on it)
-				if ref.empty?
-					g.x = (minx+maxx)/2
-				else
-					# center on the outline of rx
-					# may want to center on rx center's center ?
-					rx = ref.sort_by { |gg| gg.x }
-					med = (rx[0].x + rx[-1].x + rx[-1].w - g.w) / 2.0
-					g.x = [[med, minx].max, maxx].min
-				end
-				minx = g.x + g.w
-				maxx += g.w
-			}
-		}
-		nil
-	end
-
-	def auto_arrange_post
-		# vertical: just center each box on its layer
-		y0 = 0
-		@layers.each { |l|
-			hmax = l.map { |g| g.h }.max
-			l.each { |g|
-				g.y = y0 + (hmax - g.h)/2
-			}
-			y0 += hmax
-		}
-
-		# actually move boxes inside the groups
-		@groups.each { |g|
-			dx = (g.x + g.w/2).to_i
-			dy = (g.y + g.h/2).to_i
-			g.content.each { |b|
-				b.x += dx
-				b.y += dy
-			}
-		}
-
-		# TODO
-		# energy-minimal positionning of boxes from this basic layout
-		# avoid arrow confusions
-	end
-
-	def auto_arrange_boxes
-		auto_arrange_init
-		nil while @groups.length > 1 and auto_arrange_step
-		auto_arrange_post
-		@groups = []
+		# walk from a box, fork at each multiple to, chop links to a previous box (loops etc)
+		@madetree = false
 	end
 
 	# gives a text representation of the current graph state
 	def dump_layout(groups=@groups)
 		groups.map { |g| "#{groups.index(g)} -> #{g.to.map { |t| groups.index(t) }.sort.inspect}" }
+	end
+
+	def auto_arrange_step
+		# TODO fix
+		#  0->[1, 2] 1->[3] 2->[3, 4] 3->[] 4->[1]
+		#  push 0 jz l3  push 1 jz l4  push 2  l3: push 3  l4: hlt
+		# and more generally all non-looping graphs where this algo creates backward links
+
+		groups = @groups
+		return if groups.length <= 1
+
+		maketree = lambda { |roots|
+			next if @madetree
+			@madetree = true
+
+			maxdepth = {}	# max arc count to reach this box from graph start (excl loop)
+
+			trim = lambda { |g, from|
+				# unlink g from (part of) its from
+				from.each { |gg| gg.to.delete g }
+				g.from -= from
+			}
+
+			walk = lambda { |g|
+				# score
+				parentdepth = g.from.map { |gg| maxdepth[gg] }
+				if parentdepth.empty?
+					# root
+					maxdepth[g] = 0
+				elsif parentdepth.include? nil
+					# not farthest parent found / loop
+					next
+				# elsif maxdepth[g] => ?
+				else
+					maxdepth[g] = parentdepth.max + 1
+				end
+				g.to.each { |gg| walk[gg] }
+			}
+
+			roots.each { |g| trim[g, g.from] unless g.from.empty? }
+			roots.each { |g| walk[g] }
+			
+			# handle loops now (unmarked nodes)
+			while unmarked = groups - maxdepth.keys and not unmarked.empty?
+				if g = unmarked.find { |g_| g_.from.find { |gg| maxdepth[gg] } }
+					# loop head
+					trim[g, g.from.find_all { |gg| not maxdepth[gg] }]	# XXX not quite sure for this
+					walk[g]
+				else
+					# disconnected subgraph
+					g = unmarked.find { |g_| g_.from.empty? } || unmarked.first
+					trim[g, g.from]
+					maxdepth[g] = 0
+					walk[g]
+				end
+			end
+		}
+
+		# concat all ary boxes into its 1st element, remove trailing groups from 'groups'
+		# updates from/to
+		merge_groups = lambda { |ary|
+			bg = Box.new(nil, [])
+			bg.x, bg.y = ary.map { |g| g.x }.min, ary.map { |g| g.y }.min
+			bg.w, bg.h = ary.map { |g| g.x+g.w }.max - bg.x, ary.map { |g| g.y+g.h }.max - bg.y
+			ary.each { |g|
+				bg.content.concat g.content
+				bg.to |= g.to
+				bg.from |= g.from
+			}
+			bg.to -= ary
+			bg.to.each { |t| t.from = t.from - ary + [bg] }
+			bg.from -= ary
+			bg.from.each { |f| f.to = f.to - ary + [bg] }
+			idx = ary.map { |g| groups.index(g) }.min
+			groups = @groups = groups - ary
+			groups.insert(idx, bg)
+			bg
+		}
+
+		# move all boxes within group of dx, dy
+		move_group = lambda { |g, dx, dy|
+			g.content.each { |b| b.x += dx ; b.y += dy }
+			g.x += dx ; g.y += dy
+		}
+
+		align_hz = lambda { |ary|
+			# if we have one of the block much bigger than the others, put it on the far right
+			big = ary.sort_by { |g| g.h }.last
+			if (ary-[big]).all? { |g| g.h < big.h/3 }
+				ary -= [big]
+			else
+				big = nil
+			end
+			nx = ary.map { |g| g.w }.inject(0) { |a, b| a+b } / -2
+			nx *= 2 if big and ary.length == 1	# just put the parent on the separation of the 2 child
+			ary.each { |g|
+				move_group[g, nx-g.x, 0]
+				nx += g.w
+			}
+			move_group[big, nx-big.x, 0] if big
+		}
+		align_vt = lambda { |ary|
+			ny = ary.map { |g| g.h }.inject(0) { |a, b| a+b } / -2
+			ary.each { |g|
+				move_group[g, 0, ny-g.y]
+				ny += g.h
+			}
+		}
+
+		# scan groups for a column pattern (head has 1 'to' which from == [head])
+		group_columns = lambda {
+			groups.find { |g|
+				next if g.from.length == 1 and g.from.first.to.length == 1
+				ary = [g]
+				ary << (g = g.to.first) while g.to.length == 1 and g.to.first.from.length == 1
+				next if ary.length <= 1
+				align_vt[ary]
+				merge_groups[ary]
+				true
+			}
+		}
+
+		# scan groups for a line pattern (multiple groups with same to & same from)
+		group_lines = lambda { |strict|
+			groups.find { |g1|
+				ary = g1.from.map { |gg| gg.to }.flatten.uniq.find_all { |gg|
+					gg != g1 and
+					(gg.from - g1.from).empty? and (g1.from - gg.from).empty? and
+					(strict ? ((gg.to - g1.to).empty? and (g1.to - gg.to).empty?) : (g1.to & gg.to).first)
+				}
+				ary = g1.to.map { |gg| gg.from }.flatten.uniq.find_all { |gg|
+					gg != g1 and
+					(gg.to - g1.to).empty? and (g1.to - gg.to).empty? and
+					(strict ? ((gg.from - g1.from).empty? and (g1.from - gg.from).empty?) : (g1.from & gg.from).first)
+				} if ary.empty?
+				next if ary.empty?
+				ary << g1
+				dy = 16*ary.map { |g| g.to.length + g.from.length }.inject { |a, b| a+b }
+				ary.each { |g| g.h += dy ; g.y -= dy/2 }
+				align_hz[ary]
+				if ary.first.to.empty?	# shrink graph if highly dissymetric and to.empty?
+					ah = ary.map { |g| g.h }.max
+					ary.each { |g|
+						move_group[g, 0, (g.h-ah)/2]	# move up
+						next if not p = ary[ary.index(g)-1]
+						y = [g.y, p.y].min		# shrink width
+						h = [g.h, p.h].min
+						xp = p.content.map { |b| b.x+b.w if b.y+b.h+8 >= y and b.y-8 <= y+h }.compact.max || p.x+p.w/2
+						xg = g.content.map { |b| b.x if b.y+b.h+8 >= y and b.y-8 <= y+h }.compact.min || g.x+g.w/2
+						dx = xg-xp-24
+						next if dx <= 0
+						ary.each { |gg|
+							dx = -dx if gg == g
+							move_group[gg, dx/2, 0]
+						}
+						if p.x+p.w > ary.last.x+ary.last.w or ary.first.x > g.x # fix broken centerism
+							x = [g.x, ary.first.x].min
+							xm = [p.x+p.w, ary.last.x+ary.last.w].max
+							ary.each { |gg| move_group[gg, (x+xm)/-2, 0] }
+						end
+					}
+				end
+				merge_groups[ary]
+				true
+			}
+		}
+
+		group_inv_if = {}
+
+		# scan groups for a if/then pattern (1 -> 2 -> 3 & 1 -> 3)
+		group_ifthen = lambda { |strict|
+			groups.reverse.find { |g|
+				next if not g2 = g.to.find { |g2_| (g2_.to.length == 1 and g.to.include?(g2_.to.first)) or
+					(not strict and g2_.to.empty?)  }
+				next if strict and g2.from != [g] or g.to.length != 2
+				g2.h += 16 ; g2.y -= 8
+				align_vt[[g, g2]]
+				dx = -g2.x+8
+				dx -= g2.w+16 if group_inv_if[g]
+				move_group[g2, dx, 0]
+				merge_groups[[g, g2]]
+				true
+			}
+		}
+
+		# if (a || b) c;
+		# the 'else' case handles '&& else', and && is two if/then nested
+		group_or = lambda { |strict|
+			groups.find { |g|
+				next if g.to.length != 2
+				g2 = g.to[0]
+				g2 = g.to[1] if not g2.to.include? g.to[1]
+				thn = (g.to & g2.to).first
+				next if g2.to.length != 2 or not thn or thn.to.length != 1
+				els = (g2.to - [thn]).first
+				if thn.to == [els]
+					els = nil
+				elsif els.to != thn.to
+					next if strict
+					align_vt[[g, g2]]
+					merge_groups[[g, g2]]
+					break true
+				else
+					align_hz[[thn, els]]
+					thn = merge_groups[[thn, els]]
+				end
+				thn.h += 16 ; thn.y -= 8
+				align_vt[[g, g2, thn]]
+				move_group[g2, -g2.x, 0]
+				move_group[thn, thn.x-8, 0] if not els
+				merge_groups[[g, g2, thn]]
+				true
+			}
+		}
+
+
+		# loop with exit 1 -> 2, 3 & 2 -> 1
+		group_loop = lambda {
+			groups.find { |g|
+				next if not g2 = g.to.sort_by { |g2_| g2_.h }.find { |g2_| g2_.to == [g] or (g2_.to.empty? and g2_.from == [g]) }
+				g2.h += 16
+				align_vt[[g, g2]]
+				move_group[g2, g2.x-8, 0]
+				merge_groups[[g, g2]]
+				true
+			}
+		}
+
+		# same single from or to
+		group_halflines = lambda {
+			ary = nil
+			if groups.find { |g| ary = g.from.find_all { |gg| gg.to == [g] } and ary.length > 1 } or
+			   groups.find { |g| ary = g.to.find_all { |gg| gg.from == [g] } and ary.length > 1 }
+				align_hz[ary]
+				merge_groups[ary]
+				true
+			end
+		}
+
+
+		# unknown pattern, group as we can..
+		group_other = lambda {
+puts 'graph arrange: unknown configuration', dump_layout
+			g1 = groups.find_all { |g| g.from.empty? }
+			g1 << groups[rand(groups.length)] if g1.empty?
+			g2 = g1.map { |g| g.to }.flatten.uniq - g1
+			align_vt[g1]
+			g1 = merge_groups[g1]
+			g1.w += 128 ; g1.x -= 64
+			next if g2.empty?
+			align_vt[g2]
+			g2 = merge_groups[g2]
+			g2.w += 128 ; g2.x -= 64
+
+			align_hz[[g1, g2]]
+			merge_groups[[g1, g2]]
+			true
+		}
+
+		# check constructs with multiple blocks with to to end block (a la break;)
+		ign_break = lambda {
+			can_reach = lambda { |b1, b2, term|
+				next if b1 == term
+				done = [term]
+				todo = b1.to.dup
+				while t = todo.pop
+					next if done.include? t
+					done << t
+					break true if t == b2
+					todo.concat t.to
+				end
+			}
+			can_reach_unidir = lambda { |b1, b2, term| can_reach[b1, b2, term] and not can_reach[b2, b1, term] }
+			groups.find { |g|
+				f2 = nil
+				if (g.from.length > 2 and f3 = g.from.find { |f| f.to == [g] } and f1 = g.from.find { |f|
+					f2 = g.from.find { |ff| can_reach_unidir[ff, f3, g] and can_reach_unidir[f, ff, g] }}) or
+				   (g.to.length > 2 and f3 = g.to.find { |f| f.from == [g] } and f1 = g.to.find { |f|
+					f2 = g.to.find { |ff| can_reach_unidir[f3, ff, g] and can_reach_unidir[ff, f, g] }})
+					group_inv_if[f1] = true
+					if f3.to == [g]
+						g.from.delete f2
+						f2.to.delete g
+					else
+						g.to.delete f2
+						f2.from.delete g
+					end
+					true
+				end
+			}
+		}
+
+		# walk graph from roots, cut backward links
+		trim_graph = lambda {
+			next true if ign_break[]
+			g1 = groups.find_all { |g| g.from.empty? }
+			g1 << groups.first if g1.empty?
+			cntpre = groups.inject(0) { |cntpre_, g| cntpre_ + g.to.length }
+			g1.each { |g| maketree[[g]] }
+			cntpost = groups.inject(0) { |cntpre_, g| cntpre_ + g.to.length }
+			true if cntpre != cntpost
+		}
+
+		# known, clean patterns
+		group_clean = lambda {
+			group_columns[] or group_lines[true] or group_ifthen[true] or group_loop[] or group_or[true]
+		}
+		# approximations
+		group_unclean = lambda {
+			group_lines[false] or group_or[false] or group_halflines[] or group_ifthen[false] or group_other[]
+		}
+
+		group_clean[] or trim_graph[] or group_unclean[]
+	end
+
+	# the boxes have been almost put in place, here we soften a little the result & arrange some qwirks
+	def auto_arrange_post
+		# entrypoint should be above other boxes, same for exitpoints
+		@box.each { |b|
+			if b.from == []
+				chld = b.to
+				chld = @box - [b] if not @box.find { |bb| bb != b and bb.from == [] }
+				chld.each { |t| b.y = t.y - b.h - 16 if t.y < b.y+b.h }
+			end
+			if b.to == []
+				chld = b.from
+				chld = @box - [b] if not @box.find { |bb| bb != b and bb.to == [] }
+				chld.each { |f| b.y = f.y + f.h + 16 if f.y+f.h > b.y }
+			end
+		}
+
+		boxxy = @box.sort_by { |bb| bb.y }
+		# fill gaps that we created
+		@box.each { |b|
+			bottom = b.y+b.h
+			next if not follower = boxxy.find { |bb| bb.y+bb.h > bottom }
+
+			# preserve line[] constructs margins
+			gap = follower.y-16*follower.from.length - (bottom+16*b.to.length)
+			next if gap <= 0
+
+			@box.each { |bb|
+				if bb.y+bb.h <= bottom
+					bb.y += gap/2
+				else
+					bb.y -= gap/2
+				end
+			}
+			boxxy = @box.sort_by { |bb| bb.y }
+		}
+
+		@box[0,0].each { |b|
+			# TODO elastic positionning (ignore up arrows ?) & collision detection (box/box + box/arrow)
+			f = b.from[0]
+			t = b.to[0]
+			if b.to.length == 1 and b.from.length == 1 and b.y+b.h<t.y and b.y>f.y+f.h
+				wx = (t.x+t.w/2 + f.x+f.w/2)/2 - b.w/2
+				wy = (t.y + f.y+f.h)/2 - b.h/2
+				b.x += (wx-b.x)/5
+				b.y += (wy-b.y)/5
+			end
+		}
+
+	end
+
+	def auto_arrange_boxes
+		auto_arrange_init
+		nil while @groups.length > 1 and auto_arrange_step
+		@groups = []
+		auto_arrange_post
 	end
 end
 
@@ -563,7 +481,6 @@ class GraphViewWidget < DrawableWidget
 		@shown_boxes = []
 		@mousemove_origin = @mousemove_origin_ctrl = nil
 		@curcontext = Graph.new(nil)
-		@want_focus_addr = nil
 		@margin = 8
 		@zoom = 1.0
 		@default_color_association = { :background => :paleblue, :hlbox_bg => :palegrey, :box_bg => :white,
@@ -574,18 +491,13 @@ class GraphViewWidget < DrawableWidget
 		# @othergraphs = ?	(to keep user-specified formatting)
 	end
 
-	def view_x; @curcontext.view_x; end
-	def view_x=(vx); @curcontext.view_x = vx; end
-	def view_y; @curcontext.view_y; end
-	def view_y=(vy); @curcontext.view_y = vy; end
-
 	def resized(w, h)
 		redraw
 	end
 
 	def find_box_xy(x, y)
-		x = view_x+x/@zoom
-		y = view_y+y/@zoom
+		x = @curcontext.view_x+x/@zoom
+		y = @curcontext.view_y+y/@zoom
 		@shown_boxes.to_a.reverse.find { |b| b.x <= x and b.x+b.w > x and b.y <= y-1 and b.y+b.h > y+1 }
 	end
 
@@ -600,7 +512,7 @@ class GraphViewWidget < DrawableWidget
 				@curcontext.view_y += (y / oldzoom - y / @zoom)
 			end
 		when :down
-			if @zoom > 1.0/1000
+			if @zoom > 1.0/100
 				oldzoom = @zoom
 				@zoom /= 1.1
 				@zoom = 1.0 if (@zoom-1.0).abs < 0.05
@@ -638,10 +550,10 @@ class GraphViewWidget < DrawableWidget
 		@mousemove_origin = nil
 
 		if @mousemove_origin_ctrl
-			x1 = view_x + @mousemove_origin_ctrl[0]/@zoom
+			x1 = @curcontext.view_x + @mousemove_origin_ctrl[0]/@zoom
 			x2 = x1 + (x - @mousemove_origin_ctrl[0])/@zoom
 			x1, x2 = x2, x1 if x1 > x2
-			y1 = view_y + @mousemove_origin_ctrl[1]/@zoom
+			y1 = @curcontext.view_y + @mousemove_origin_ctrl[1]/@zoom
 			y2 = y1 + (y - @mousemove_origin_ctrl[1])/@zoom
 			y1, y2 = y2, y1 if y1 > y2
 			@selected_boxes |= @curcontext.box.find_all { |b| b.x >= x1 and b.x + b.w <= x2 and b.y >= y1 and b.y + b.h <= y2 }
@@ -668,8 +580,8 @@ class GraphViewWidget < DrawableWidget
 		if b = find_box_xy(x, y)
 			@selected_boxes = [b] if not @selected_boxes.include? b
 			@caret_box = b
-			@caret_x = (view_x+x/@zoom-b.x-1).to_i / @font_width
-			@caret_y = (view_y+y/@zoom-b.y-1).to_i / @font_height
+			@caret_x = (@curcontext.view_x+x/@zoom-b.x-1).to_i / @font_width
+			@caret_y = (@curcontext.view_y+y/@zoom-b.y-1).to_i / @font_height
 			update_caret
 		else
 			@selected_boxes = []
@@ -678,30 +590,12 @@ class GraphViewWidget < DrawableWidget
 		redraw
 	end
 
-	def setup_contextmenu(b, m)
-		cm = new_menu
-		addsubmenu(cm, 'copy _word') { clipboard_copy(@hl_word) if @hl_word }
-		addsubmenu(cm, 'copy _line') { clipboard_copy(@caret_box[:line_text_col][@caret_y].map { |ss, cc| ss }.join) }
-		addsubmenu(cm, 'copy _box')  {
-			sb = @selected_boxes
-			sb = [@curbox] if sb.empty?
-			clipboard_copy(sb.map { |ob| ob[:line_text_col].map { |s| s.map { |ss, cc| ss }.join + "\r\n" }.join }.join("\r\n"))
-		}	# XXX auto \r\n vs \n
-		addsubmenu(m, '_clipboard', cm)
-		addsubmenu(m, 'clone _window') { @parent_widget.clone_window(@hl_word, :graph) }
-	end
-
 	# if the target is a call to a subfunction, open a new window with the graph of this function (popup)
 	def rightclick(x, y)
 		if b = find_box_xy(x, y) and @zoom >= 0.90 and @zoom <= 1.1
 			click(x, y)
 			@mousemove_origin = nil
-			m = new_menu
-			setup_contextmenu(b, m)
-			if @parent_widget.respond_to?(:extend_contextmenu)
-				@parent_widget.extend_contextmenu(self, m, @caret_box[:line_address][@caret_y])
-			end
-			popupmenu(m, x, y)
+			@parent_widget.clone_window(@hl_word, :graph)
 		end
 	end
 
@@ -711,7 +605,7 @@ class GraphViewWidget < DrawableWidget
 			if @hl_word and @zoom >= 0.90 and @zoom <= 1.1
 				@parent_widget.focus_addr(@hl_word)
 			else
-				@parent_widget.focus_addr((b[:addresses] || b[:line_address]).first)
+				@parent_widget.focus_addr b[:addresses].first
 			end
 		elsif doubleclick_check_arrow(x, y)
 		elsif @zoom == 1.0
@@ -727,8 +621,8 @@ class GraphViewWidget < DrawableWidget
 	# check if the user clicked on the beginning/end of an arrow, if so focus on the other end
 	def doubleclick_check_arrow(x, y)
 		return if @margin*@zoom < 2
-		x = view_x+x/@zoom
-		y = view_y+y/@zoom
+		x = @curcontext.view_x+x/@zoom
+		y = @curcontext.view_y+y/@zoom
 		sx = nil
 		if bt = @shown_boxes.to_a.reverse.find { |b|
 			y >= b.y+b.h-1 and y <= b.y+b.h-1+@margin+2 and
@@ -738,13 +632,7 @@ class GraphViewWidget < DrawableWidget
 			idx = (x-sx+@margin/4).to_i / (@margin/2)
 			idx = 0 if idx < 0
 			idx = bt.to.length-1 if idx >= bt.to.length
-			if bt.to[idx]
-				if @parent_widget
-					@parent_widget.focus_addr bt.to[idx][:line_address][0]
-				else
-					focus_xy(bt.to[idx].x, bt.to[idx].y)
-				end
-			end
+			@parent_widget.focus_addr bt.to[idx][:line_address][0] if bt.to[idx]
 			true
 		elsif bf = @shown_boxes.to_a.reverse.find { |b|
 			y >= b.y-@margin-2 and y <= b.y and
@@ -754,25 +642,17 @@ class GraphViewWidget < DrawableWidget
 			idx = (x-sx+@margin/4).to_i / (@margin/2)
 			idx = 0 if idx < 0
 			idx = bf.from.length-1 if idx >= bf.from.length
-			if bf.from[idx]
-				if @parent_widget
-					@parent_widget.focus_addr bf.from[idx][:line_address][-1]
-				else
-					focus_xy(bt.from[idx].x, bt.from[idx].y)
-				end
-			end
+			@parent_widget.focus_addr bf.from[idx][:line_address][-1] if bf.from[idx]
 			true
 		end
 	end
 
 	# update the zoom & view_xy to show the whole graph in the window
 	def zoom_all
-		minx, miny, maxx, maxy = @curcontext.boundingbox
-		minx -= @margin
-		miny -= @margin
-		maxx += @margin
-		maxy += @margin
-
+		minx = @curcontext.box.map { |b| b.x }.min.to_i - 10
+		miny = @curcontext.box.map { |b| b.y }.min.to_i - 10
+		maxx = @curcontext.box.map { |b| b.x + b.w }.max.to_i + 10
+		maxy = @curcontext.box.map { |b| b.y + b.h }.max.to_i + 10
 		@zoom = [width.to_f/(maxx-minx), height.to_f/(maxy-miny)].min
 		@zoom = 1.0 if @zoom > 1.0 or (@zoom-1.0).abs < 0.1
 		@curcontext.view_x = minx + (maxx-minx-width/@zoom)/2
@@ -800,10 +680,9 @@ class GraphViewWidget < DrawableWidget
 		}
 
 		@shown_boxes = []
-		w_w = width
-	       	w_h = height
+		w_w, w_h = width, height
 		@curcontext.box.each { |b|
-			next if b.x >= view_x+w_w/@zoom or b.y >= view_y+w_h/@zoom or b.x+b.w <= view_x or b.y+b.h <= view_y
+			next if b.x >= @curcontext.view_x+w_w/@zoom or b.y >= @curcontext.view_y+w_h/@zoom or b.x+b.w <= @curcontext.view_x or b.y+b.h <= @curcontext.view_y
 			@shown_boxes << b
 			paint_box(b)
 		}
@@ -822,16 +701,21 @@ class GraphViewWidget < DrawableWidget
 	end
 
 	def paint_arrow(b1, b2)
-		x1 = x1o = b1.x+b1.w/2-view_x
-		y1 = b1.y+b1.h-view_y
-		x2 = x2o = b2.x+b2.w/2-view_x
-		y2 = b2.y-1-view_y
+		x1, y1 = b1.x+b1.w/2-@curcontext.view_x, b1.y+b1.h-@curcontext.view_y
+		x2, y2 = b2.x+b2.w/2-@curcontext.view_x, b2.y-1-@curcontext.view_y
+		x1o, x2o = x1, x2
 		margin = @margin
 		x1 += (-(b1.to.length-1)/2 + b1.to.index(b2)) * margin/2
 		x2 += (-(b2.from.length-1)/2 + b2.from.index(b1)) * margin/2
 		return if (y1+margin < 0 and y2 < 0) or (y1 > height/@zoom and y2-margin > height/@zoom)	# just clip on y
 		margin, x1, y1, x2, y2, b1w, b2w, x1o, x2o = [margin, x1, y1, x2, y2, b1.w, b2.w, x1o, x2o].map { |v| v*@zoom }
 
+
+		# XXX gtk wraps coords around 0x8000
+		if x1.abs > 0x7000 ; y1 /= x1.abs/0x7000 ; x1 /= x1.abs/0x7000 ; end
+		if y1.abs > 0x7000 ; x1 /= y1.abs/0x7000 ; y1 /= y1.abs/0x7000 ; end
+		if x2.abs > 0x7000 ; y2 /= x2.abs/0x7000 ; x2 /= x2.abs/0x7000 ; end
+		if y2.abs > 0x7000 ; x2 /= y2.abs/0x7000 ; y2 /= y2.abs/0x7000 ; end
 
 		# straighten vertical arrows if possible
 		if y2 > y1 and (x1-x2).abs <= margin
@@ -896,29 +780,28 @@ class GraphViewWidget < DrawableWidget
 
 	def paint_box(b)
 		set_color_boxshadow(b)
-		draw_rectangle((b.x-view_x+3)*@zoom, (b.y-view_y+4)*@zoom, b.w*@zoom, b.h*@zoom)
+		draw_rectangle((b.x-@curcontext.view_x+3)*@zoom, (b.y-@curcontext.view_y+4)*@zoom, b.w*@zoom, b.h*@zoom)
 		set_color_box(b)
-		draw_rectangle((b.x-view_x)*@zoom, (b.y-view_y+1)*@zoom, b.w*@zoom, b.h*@zoom)
+		draw_rectangle((b.x-@curcontext.view_x)*@zoom, (b.y-@curcontext.view_y+1)*@zoom, b.w*@zoom, b.h*@zoom)
 
 		# current text position
-		x = (b.x - view_x + 1)*@zoom
-		y = (b.y - view_y + 1)*@zoom
-		w_w = (b.x - view_x + b.w - @font_width)*@zoom
-		w_h = (b.y - view_y + b.h - @font_height)*@zoom
-		w_h = height if w_h > height
+		x = (b.x - @curcontext.view_x + 1)*@zoom
+		y = (b.y - @curcontext.view_y + 1)*@zoom
+		w_w = (b.x - @curcontext.view_x + b.w - @font_width)*@zoom
+		w_h = (b.y - @curcontext.view_y + b.h - @font_height)*@zoom
 
-		if @parent_widget and @parent_widget.bg_color_callback
+		if @parent_widget.bg_color_callback
 			ly = 0
 			b[:line_address].each { |a|
 				if c = @parent_widget.bg_color_callback[a]
-					draw_rectangle_color(c, (b.x-view_x)*@zoom, (1+b.y-view_y+ly*@font_height)*@zoom, b.w*@zoom, (@font_height*@zoom).ceil)
+					draw_rectangle_color(c, (b.x-@curcontext.view_x)*@zoom, (1+b.y-@curcontext.view_y+ly*@font_height)*@zoom, b.w*@zoom, (@font_height*@zoom).ceil)
 				end
 				ly += 1
 			}
 		end
 
 		if @caret_box == b
-			draw_rectangle_color(:cursorline_bg, (b.x-view_x)*@zoom, (1+b.y-view_y+@caret_y*@font_height)*@zoom, b.w*@zoom, @font_height*@zoom)
+			draw_rectangle_color(:cursorline_bg, (b.x-@curcontext.view_x)*@zoom, (1+b.y-@curcontext.view_y+@caret_y*@font_height)*@zoom, b.w*@zoom, @font_height*@zoom)
 		end
 
 		return if @zoom < 0.99 or @zoom > 1.1
@@ -927,11 +810,12 @@ class GraphViewWidget < DrawableWidget
 		# renders a string at current cursor position with a color
 		# must not include newline
 		render = lambda { |str, color|
+			# function ends when we write under the bottom of the listing
 			next if y >= w_h+2 or x >= w_w
 			if @hl_word
 				stmp = str
 				pre_x = 0
-				while stmp =~ @hl_word_re
+				while stmp =~ /^(.*?)(\b#{Regexp.escape @hl_word}\b)/
 					s1, s2 = $1, $2
 					pre_x += s1.length * @font_width
 					hl_x = s2.length * @font_width
@@ -944,17 +828,15 @@ class GraphViewWidget < DrawableWidget
 			x += str.length * @font_width
 		}
 
-		yoff = @font_height * @zoom
 		b[:line_text_col].each { |list|
-			list.each { |s, c| render[s, c] } if y >= -yoff
-			x = (b.x - view_x + 1)*@zoom
-			y += yoff
-			break if y > w_h+2
+			list.each { |s, c| render[s, c] }
+			x = (b.x - @curcontext.view_x + 1)*@zoom
+			y += @font_height*@zoom
 		}
 
 		if b == @caret_box and focus?
-			cx = (b.x - view_x + 1 + @caret_x*@font_width)*@zoom
-			cy = (b.y - view_y + 1 + @caret_y*@font_height)*@zoom
+			cx = (b.x - @curcontext.view_x + 1 + @caret_x*@font_width)*@zoom
+			cy = (b.y - @curcontext.view_y + 1 + @caret_y*@font_height)*@zoom
 			draw_line_color(:caret, cx, cy, cx, cy+(@font_height-1)*@zoom)
 		end
 	end
@@ -990,38 +872,6 @@ class GraphViewWidget < DrawableWidget
 			by = @caret_box.y + @caret_box.h/2
 			@caret_box = ctx.box.find { |cb| cb.x < bx and cb.x+cb.w > bx and cb.y < by and cb.y+cb.h > by }
 		end
-	end
-
-	def load_dotfile(path)
-		load_dot(File.read(path))
-	end
-
-	def load_dot(dota)
-		@want_update_graph = false
-		@curcontext.clear
-		boxes = {}
-		new_box = lambda { |text|
-			b = @curcontext.new_box(text, :line_text_col => [[[text, :text]]])
-			b.w = (text.length+1) * @font_width
-			b.h = @font_height
-			b
-		}
-		max = dota.length
-		i = 0
-		dota.scan(/^.*$/) { |l|
-			a = l.strip.chomp(';').split(/->/).map { |s| s.strip.delete '"' }
-			next if not id = a.shift
-			b0 = boxes[id] ||= new_box[id]
-			while id = a.shift
-				b1 = boxes[id] ||= new_box[id]
-				b0.to   |= [b1]
-				b1.from |= [b0]
-				b0 = b1
-			end
-		}
-		redraw
-rescue Interrupt
-p boxes.length
 	end
 
 	# create the graph objects in ctx
@@ -1143,8 +993,6 @@ p boxes.length
 				}
 				@parent_widget.list_bghilight("search result for /#{pat}/i", list) { |i| @parent_widget.focus_addr i[0] }
 			}
-		when ?+; mouse_wheel_ctrl(:up, width/2, height/2)
-		when ?-; mouse_wheel_ctrl(:down, width/2, height/2)
 		else return false
 		end
 		true
@@ -1278,19 +1126,12 @@ p boxes.length
 				b_.to.each { |bb| bb.from.delete b_ }
 			}
 			redraw
-		when :popupmenu
-			if @caret_box
-				cx = (@caret_box.x - view_x + 1 + @caret_x*@font_width)*@zoom
-				cy = (@caret_box.y - view_y + 1 + @caret_y*@font_height)*@zoom
-				rightclick(cx, cy)
-			end
 
 		when ?a
-			t0 = Time.now
 			puts 'autoarrange'
 			@curcontext.auto_arrange_boxes
 			redraw
-			puts 'autoarrange done %.02f' % (Time.now - t0)
+			puts 'autoarrange done'
 		when ?u
 			gui_update
 
@@ -1412,7 +1253,7 @@ p boxes.length
 	# start or an entrypoint is found, then the graph is created from there
 	# will call gui_update then
 	def focus_addr(addr, can_update_context=true)
-		return if @parent_widget and not addr = @parent_widget.normalize(addr)
+		return if not addr = @parent_widget.normalize(addr)
 		return if not @dasm.di_at(addr)
 
 		# move window / change curcontext
@@ -1436,11 +1277,11 @@ p boxes.length
 	end
 
 	def focus_xy(x, y)
-		if not view_x or view_x*@zoom + width*3/4 < x or view_x*@zoom > x
+		if not @curcontext.view_x or @curcontext.view_x*@zoom + width*3/4 < x or @curcontext.view_x*@zoom > x
 			@curcontext.view_x = (x - width/5)/@zoom
 			redraw
 		end
-		if not view_y or view_y*@zoom + height*3/4 < y or view_y*@zoom > y
+		if not @curcontext.view_y or @curcontext.view_y*@zoom + height*3/4 < y or @curcontext.view_y*@zoom > y
 			@curcontext.view_y = (y - height/5)/@zoom
 			redraw
 		end
@@ -1451,7 +1292,7 @@ p boxes.length
 	def update_caret
 		return if not @caret_box or not @caret_x or not l = @caret_box[:line_text_col][@caret_y]
 		l = l.map { |s, c| s }.join
-		@parent_widget.focus_changed_callback[] if @parent_widget and @parent_widget.focus_changed_callback and @oldcaret_y != @caret_y
+		@parent_widget.focus_changed_callback[] if @parent_widget.focus_changed_callback and @oldcaret_y != @caret_y
 		update_hl_word(l, @caret_x)
 		redraw
 	end

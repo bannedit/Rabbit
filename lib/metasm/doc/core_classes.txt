@@ -46,8 +46,7 @@ Debugger
 * <core/Debugger.txt>
 * <core/LinDebugger.txt>
 * <core/WinDebugger.txt>
-* <core/PTrace.txt>
-* <core/GdbClient.txt>
+* <core/PTrace32.txt>
 * <core/WinDbgAPI.txt>
 
 Disassembler
