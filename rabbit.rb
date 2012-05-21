@@ -2,11 +2,12 @@
 
 $:.unshift('.')
 require 'lib/metasm/metasm'
+require 'utils'
 
 module Rabbit
 
 	class Debugger < Metasm::WinDbgAPI
-		#include Rabbit::Utils # contains code for symbol look ups and various other useful stuff
+		include Rabbit::Utils # contains code for symbol look ups and various other useful stuff
 
 		def initialize(target, debug_child = false)
 			# check if we have debug privs
@@ -21,33 +22,28 @@ module Rabbit
 				abort 'target needed'
 			end
 
-			# check if target is a path if it is look for existing processes matching the process name and get the pid
-			# if there is no pid start the process
 			if target.class == String
-				puts target
-				if target.include?('\\')
-					exe = target[ target.rindex('\\') + 1, target.length-target.rindex('\\') ] unless not target.include?('\\')
-				else
-					exe = target
-				end
-				proc = Metasm::WinOS.find_process(target)
-
-				if proc
-					@pid = proc.pid
-				else # make sure that target is a path, create the process if its not already running (Taken from metasm WinDbgAPI code)
-					if target.include?(File::SEPARATOR) and File.executable?(target)
-						flags = Metasm::WinAPI::DEBUG_PROCESS
-						flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
-						startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
-						processinfo = [0, 0, 0, 0].pack('L*')
-						if Metasm::WinAPI.createprocessa(nil, target, nil, nil, 0, flags, nil, nil, startupinfo, processinfo)
-							@pid = processinfo.unpack('LLL')[2]
-						else
-							puts("[error] - #{target} is not a valid executable file.")
-						end
+				if File.executable?(target)
+					# first check if the process is already running and get the pid if it is
+					proc = Metasm::WinOS.find_process(target)
+					if proc
+						@pid = proc.pid
+						puts "Attaching to #{@pid}"
 					else
-						puts("[error] - #{target} is not an executable file.")
-						exit(-1)
+						# if the process is not running start it
+						puts "Creating process #{target}"
+						self.createproc(debug_child)
+					end
+				else
+					# lets see if the target exists in any of the PATH directories
+					paths = ENV['PATH'].split(';')
+					paths.each do |path|
+						exe = path + "\\" + target
+						if File.executable?(exe) # start the executable
+							self.createproc(debug_child)
+						else
+							puts("[error] - #{target} is not a valid executable.")
+						end
 					end
 				end
 			end
@@ -58,8 +54,21 @@ module Rabbit
 			puts "debugging session finished"
 		end
 
+		def createproc
+			flags = Metasm::WinAPI::DEBUG_PROCESS
+			flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
+			startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
+			processinfo = [0, 0, 0, 0].pack('L*')
+
+			if Metasm::WinAPI.createprocessa(nil, target, nil, nil, 0, flags, nil, nil, startupinfo, processinfo)
+				pid = processinfo.unpack('LLL')[2]
+			end
+			@pid = pid
+		end
+
 		def detach
 			Metasm::WinAPI.debugactiveprocessstop(@pid)
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_exception(pid, tid, info)
@@ -68,7 +77,7 @@ module Rabbit
 				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp]]
 
 			exe = Metasm::ExeFormat.new(Metasm::Ia32.new)
-			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip] )
+			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip])
 			opcode = @mem[pid][ctx[:eip], inst.bin_length].to_s.unpack("H*")[0]
 
 			disasm = "%08x\t%s\t%s" % [ctx[:eip], opcode, inst.instruction]
@@ -87,16 +96,12 @@ module Rabbit
 					end
 				end
 
-				puts status
-				puts regs
-				puts disas
+				status_msg(status, regs, disasm)
 				Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 
 			when Metasm::WinAPI::STATUS_BREAKPOINT
 				status = "Break instruction exception - %08x " % info.code
-				puts status
-				puts regs
-				puts disasm
+				status_msg(status, regs, disasm)
 				Metasm::WinAPI::DBG_CONTINUE
 
 			when WinAPI::STATUS_SINGLE_STEP
@@ -116,7 +121,7 @@ module Rabbit
 		end
 
 		def handler_endprocess(pid, tid, info)
-			puts "#{pid}:#{tid} process died"
+			puts "#{pid}:#{tid} process quit."
 			prehandler_endprocess(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
 		end
