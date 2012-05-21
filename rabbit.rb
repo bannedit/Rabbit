@@ -54,7 +54,7 @@ module Rabbit
 			puts "debugging session finished"
 		end
 
-		def createproc
+		def createproc(debug_child)
 			flags = Metasm::WinAPI::DEBUG_PROCESS
 			flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
 			startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
