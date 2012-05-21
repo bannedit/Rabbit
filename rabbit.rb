@@ -9,41 +9,48 @@ module Rabbit
 	class Debugger < Metasm::WinDbgAPI
 		include Rabbit::Utils # contains code for symbol look ups and various other useful stuff
 
-		def initialize(target, debug_child = false)
+		def initialize(target = nil, debug_child = false)
 			# check if we have debug privs
 			if not Metasm::WinOS.get_debug_privilege
-				puts("[error] - Failed to get debug privilege, quiting.")
-				exit(-1)
+				abort "[error] - Failed to get debug privilege, quiting."
 			end
 
 			# make sure target is passed properly
 			if target.nil? or target.empty?
 				puts Metasm::WinOS.list_processes.sort_by { |proc| proc.pid }
-				abort 'target needed'
+				abort "target needed"
 			end
 
 			if target.class == String
-				if File.executable?(target)
-					# first check if the process is already running and get the pid if it is
-					proc = Metasm::WinOS.find_process(target)
-					if proc
-						@pid = proc.pid
-						puts "Attaching to #{@pid}"
-					else
-						# if the process is not running start it
-						puts "Creating process #{target}"
-						self.createproc(debug_child)
-					end
+				# first check if the process is already running and get the pid if it is
+				exe = target.split(File::SEPARATOR).last
+				proc = Metasm::WinOS.find_process(exe)
+
+				if proc
+					@pid = proc.pid
+					vprint "Attaching to #{@pid}"
 				else
-					# lets see if the target exists in any of the PATH directories
-					paths = ENV['PATH'].split(';')
-					paths.each do |path|
-						exe = path + "\\" + target
-						if File.executable?(exe) # start the executable
-							self.createproc(debug_child)
-						else
-							puts("[error] - #{target} is not a valid executable.")
+					if File.executable?(target) # this checks if the path leads to an exe
+						pid = self.createproc(target, debug_child)
+						if pid
+							vprint "Created process #{target} - #{pid}"
 						end
+					else
+						# lets see if the target exists in any of the PATH directories
+						paths = ENV['PATH'].split(';')
+						pid = nil
+						paths.each do |path|
+							exe = path + "\\" + target
+							if File.executable?(exe) # start the executable
+								pid = self.createproc(exe, debug_child)
+								break
+							end
+						end
+					end
+					if not pid.nil?
+						vprint "Created process #{exe} - #{pid}"
+					else
+						abort "[error] - Could not execute #{exe}."
 					end
 				end
 			end
@@ -51,10 +58,10 @@ module Rabbit
 			# we should have a valid pid at this time
 			@dbg = super(@pid, debug_child)
 			loop
-			puts "debugging session finished"
+			vprint "debugging session finished"
 		end
 
-		def createproc(debug_child)
+		def createproc(target, debug_child)
 			flags = Metasm::WinAPI::DEBUG_PROCESS
 			flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
 			startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
@@ -121,7 +128,7 @@ module Rabbit
 		end
 
 		def handler_endprocess(pid, tid, info)
-			puts "#{pid}:#{tid} process quit."
+			vprint "#{pid}:#{tid} process quit."
 			prehandler_endprocess(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
 		end
