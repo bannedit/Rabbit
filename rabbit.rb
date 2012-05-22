@@ -6,62 +6,20 @@ require 'utils'
 
 module Rabbit
 
-	class Debugger < Metasm::WinDbgAPI
+	class Debugger
 		include Rabbit::Utils # contains code for symbol look ups and various other useful stuff
 
-		def initialize(target = nil, debug_child = false)
+		def initialize
+			@dbg = nil
+			@pid = nil
+
 			# check if we have debug privs
 			if not Metasm::WinOS.get_debug_privilege
 				abort "[error] - Failed to get debug privilege, quiting."
 			end
-
-			# make sure target is passed properly
-			if target.nil? or target.empty?
-				puts Metasm::WinOS.list_processes.sort_by { |proc| proc.pid }
-				abort "target needed"
-			end
-
-			if target.class == String
-				# first check if the process is already running and get the pid if it is
-				exe = target.split(File::SEPARATOR).last
-				proc = Metasm::WinOS.find_process(exe)
-
-				if proc
-					@pid = proc.pid
-					vprint "Attaching to #{@pid}"
-				else
-					if File.executable?(target) # this checks if the path leads to an exe
-						pid = self.createproc(target, debug_child)
-						if pid
-							vprint "Created process #{target} - #{pid}"
-						end
-					else
-						# lets see if the target exists in any of the PATH directories
-						paths = ENV['PATH'].split(';')
-						pid = nil
-						paths.each do |path|
-							exe = path + "\\" + target
-							if File.executable?(exe) # start the executable
-								pid = self.createproc(exe, debug_child)
-								break
-							end
-						end
-					end
-					if not pid.nil?
-						vprint "Created process #{exe} - #{pid}"
-					else
-						abort "[error] - Could not execute #{exe}."
-					end
-				end
-			end
-
-			# we should have a valid pid at this time
-			@dbg = super(@pid, debug_child)
-			loop
-			vprint "debugging session finished"
 		end
 
-		def createproc(target, debug_child)
+		def createproc(target, debug_child = false)
 			flags = Metasm::WinAPI::DEBUG_PROCESS
 			flags |= Metasm::WinAPI::DEBUG_ONLY_THIS_PROCESS if not debug_child
 			startupinfo = [17*[0].pack('L').length, *([0]*16)].pack('L*')
@@ -73,9 +31,77 @@ module Rabbit
 			@pid = pid
 		end
 
+		def load(target, debug_child = false)
+			paths = ENV['PATH'].split(';')
+			pid = nil
+			exe = ""
+			paths.each do |path|
+				exe = path + "\\" + target
+				if File.executable?(exe) # start the executable
+					pid = self.createproc(exe, debug_child)
+					break
+				end
+			end
+			if not pid.nil?
+				vprint "Created process #{exe} - #{pid}"
+				@dbg = Metasm::WinDbgAPI.new(pid)
+				@mem = @dbg.mem
+			else
+				abort "[error] - Could not execute #{exe}."
+			end
+		end
+
+		def attach(pid, debug_child = false)
+			if pid.class == String
+				# first check if the process is already running and get the pid if it is running
+				exe = pid.split(File::SEPARATOR).last
+				exe = exe.split("/").last
+				proc = Metasm::WinOS.find_process(exe)
+
+				if proc
+					@pid = proc.pid
+					vprint "Attaching to #{@pid} - #{exe} by name"
+				end
+				@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
+				@mem = @dbg.mem
+			else
+				proc = Metasm::WinOS.find_process(pid)
+				if proc
+					@pid = proc.pid
+					exe = proc.modules.first.path
+					vprint "Attaching to #{@pid} - #{exe} by pid"
+					@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
+					@mem = @dbg.mem
+				end
+			end
+		end
+
 		def detach
 			Metasm::WinAPI.debugactiveprocessstop(@pid)
 			Metasm::WinAPI::DBG_CONTINUE
+		end
+
+		def run
+			if not @dbg
+				abort "Debugger could not attach to or execute a process"
+			end
+
+			@dbg.loop do |pid_, tid, code, info|
+				case code
+				when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT;      handler_exception   pid, tid, info
+				when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT; handler_newprocess  pid, tid, info
+				when Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT;  handler_newthread   pid, tid, info
+				when Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT;   handler_endprocess  pid, tid, info
+				when Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT;    handler_endthread   pid, tid, info
+				when Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT;       handler_loaddll     pid, tid, info
+				when Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT;     handler_unloaddll   pid, tid, info
+				when Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT;  handler_debugstring pid, tid, info
+				when Metasm::WinAPI::RIP_EVENT;                  handler_rip         pid, tid, info
+				else                                             handler_unknown     pid, tid, code, info
+				end
+			end
+
+			vprint "debugging session finished"
 		end
 
 		def handler_exception(pid, tid, info)
@@ -131,6 +157,21 @@ module Rabbit
 			vprint "#{pid}:#{tid} process quit."
 			prehandler_endprocess(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
+		end
+
+		def handler_newprocess(pid, tid, info)
+		end
+
+		def handler_endthread(pid, tid, info)
+		end
+
+		def handler_debugstring(pid, tid, info)
+		end
+
+		def handler_rip(pid, tid, info)
+		end
+
+		def handler_unknown(pid, tid, code, info)
 		end
 
 	end
