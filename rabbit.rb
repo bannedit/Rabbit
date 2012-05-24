@@ -7,16 +7,86 @@ require 'utils'
 module Rabbit
 
 	class Debugger
-		include Rabbit::Utils # contains code for symbol look ups and various other useful stuff
-
+		include Rabbit::Utils # contains code for verbose printing
+		include Rabbit::Symbols # code for symbol look ups
 		def initialize
 			@dbg = nil
 			@pid = nil
+			@cpu = Metasm::Ia32.new(32) # at the moment we're just testing on 32bit
+			@breakpoints = []
+			@handlers = {
+				Metasm::WinAPI::EXCEPTION_DEBUG_EVENT       => :handler_exception,
+				Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT  => :handler_newprocess,
+				Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT   => :handler_newthread,
+				Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT    => :handler_endprocess,
+				Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT     => :handler_endthread,
+				Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT        => :handler_loaddll,
+				Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT      => :handler_unloaddll,
+				Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT   => :handler_debugstring,
+				Metasm::WinAPI::RIP_EVENT                   => :handler_rip
+			}
 
 			# check if we have debug privs
 			if not Metasm::WinOS.get_debug_privilege
 				abort "[error] - Failed to get debug privilege, quiting."
 			end
+		end
+
+		def enable_bp(addr)
+			return if not b = @breakpoint[addr]
+			@cpu.dbg_enable_bp(self, addr, b)
+			b.state = :enabled
+		end
+
+		def disable_bp(addr)
+			return if not b = @breakpoint[addr]
+			@cpu.dbg_disable_bp(self, addr, b)
+			b.state = :disabled
+		end
+
+		def set_handler(code, handler)
+			if not @handlers.has_key?(code)
+				puts "[error] - debug event code does not exist for custom handler"
+				return false
+			end
+
+			if defined?(handler.to_sym.to_s) == "method"
+				@handlers[code] = handler.to_sym
+				return true
+			else
+				puts "[error] - custom handler method is not defined"
+				return false
+			end
+		end
+
+		def reset_handler(code)
+			if not @handlers.has_key?(code)
+				puts "[error] - cannot reset handler debug event code does not exist"
+				return false
+			end
+
+			case code
+			when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::EXCEPTION_DEBUG_EVENT] = :handler_exception
+			when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT] = :handler_newprocess
+			when Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT] = :handler_newthread
+			when Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT] = :handler_endprocess
+			when Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT] = :handler_endthread
+			when Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT] = :handler_loaddll
+			when Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT
+				@handlers[Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT] = :handler_unloaddll
+			when Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT
+				@handlers[Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT] = :handler_debugstring
+			when Metasm::WinAPI::RIP_EVENT
+				@handlers[Metasm::WinAPI::RIP_EVENT] = :handler_rip
+			end
+
+			return true
 		end
 
 		def createproc(target, debug_child = false)
@@ -44,8 +114,10 @@ module Rabbit
 			end
 			if not pid.nil?
 				vprint "Created process #{exe} - #{pid}"
+				@pid = pid
 				@dbg = Metasm::WinDbgAPI.new(pid)
 				@mem = @dbg.mem
+				@hprocess = @dbg.hprocess
 			else
 				abort "[error] - Could not execute #{exe}."
 			end
@@ -64,6 +136,7 @@ module Rabbit
 				end
 				@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
 				@mem = @dbg.mem
+				@hprocess = @dbg.hprocess
 			else
 				proc = Metasm::WinOS.find_process(pid)
 				if proc
@@ -72,6 +145,7 @@ module Rabbit
 					vprint "Attaching to #{@pid} - #{exe} by pid"
 					@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
 					@mem = @dbg.mem
+					@hprocess = @dbg.hprocess
 				end
 			end
 		end
@@ -88,16 +162,34 @@ module Rabbit
 
 			@dbg.loop do |pid_, tid, code, info|
 				case code
-				when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT;      handler_exception   pid, tid, info
-				when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT; handler_newprocess  pid, tid, info
-				when Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT;  handler_newthread   pid, tid, info
-				when Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT;   handler_endprocess  pid, tid, info
-				when Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT;    handler_endthread   pid, tid, info
-				when Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT;       handler_loaddll     pid, tid, info
-				when Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT;     handler_unloaddll   pid, tid, info
-				when Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT;  handler_debugstring pid, tid, info
-				when Metasm::WinAPI::RIP_EVENT;                  handler_rip         pid, tid, info
-				else                                             handler_unknown     pid, tid, code, info
+				when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::EXCEPTION_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT
+					send(@handlers[Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT
+					send(@handlers[Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT], pid, tid, info)
+
+				when Metasm::WinAPI::RIP_EVENT
+					send(@handlers[Metasm::WinAPI::RIP_EVENT], pid, tid, info)
+				else
+					handler_unknown(pid, tid, code, info)
 				end
 			end
 
@@ -148,9 +240,12 @@ module Rabbit
 		end
 
 		def handler_loaddll(pid, tid, info)
+			status = "ModLoad: "
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_unloaddll(pid, tid, info)
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_endprocess(pid, tid, info)
@@ -160,18 +255,23 @@ module Rabbit
 		end
 
 		def handler_newprocess(pid, tid, info)
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_endthread(pid, tid, info)
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_debugstring(pid, tid, info)
+			Metasm::WinAPI::DBG_CONTINUE
 		end
 
 		def handler_rip(pid, tid, info)
+			Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 		end
 
 		def handler_unknown(pid, tid, code, info)
+			Metasm::WinAPI::DBG_EXCEPTION_NOT_HANDLED
 		end
 
 	end
