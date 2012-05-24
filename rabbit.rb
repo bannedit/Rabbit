@@ -9,11 +9,12 @@ module Rabbit
 	class Debugger
 		include Rabbit::Utils # contains code for verbose printing
 		include Rabbit::Symbols # code for symbol look ups
+
 		def initialize
 			@dbg = nil
 			@pid = nil
 			@cpu = Metasm::Ia32.new(32) # at the moment we're just testing on 32bit
-			@breakpoints = []
+			@breakpoints = {}
 			@handlers = {
 				Metasm::WinAPI::EXCEPTION_DEBUG_EVENT       => :handler_exception,
 				Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT  => :handler_newprocess,
@@ -36,12 +37,26 @@ module Rabbit
 			return if not b = @breakpoint[addr]
 			@cpu.dbg_enable_bp(self, addr, b)
 			b.state = :enabled
+			@breakpoints << {addr => "enabled"}
 		end
 
 		def disable_bp(addr)
 			return if not b = @breakpoint[addr]
 			@cpu.dbg_disable_bp(self, addr, b)
 			b.state = :disabled
+			@breakpoints << {addr => "disabled"}
+		end
+
+		def delete_bp(addr)
+			@breakpoints.delete(addr)
+		end
+
+		def list_bps
+			cnt = 0
+			@breakpoints.each do |addr, status|
+				puts "#{cnt} %08x - #{status}" % addr
+				cnt += 1
+			end
 		end
 
 		def set_handler(code, handler)
