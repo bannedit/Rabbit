@@ -178,33 +178,33 @@ module Rabbit
 			@dbg.loop do |pid_, tid, code, info|
 				case code
 				when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::EXCEPTION_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::EXCEPTION_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::EXIT_PROCESS_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::EXIT_THREAD_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::LOAD_DLL_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT
-					send(@handlers[Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::UNLOAD_DLL_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT
-					send(@handlers[Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::RIP_EVENT
-					send(@handlers[Metasm::WinAPI::RIP_EVENT], pid, tid, info)
+					send(@handlers[Metasm::WinAPI::RIP_EVENT], pid_, tid, info)
 				else
-					handler_unknown(pid, tid, code, info)
+					handler_unknown(pid_, tid, code, info)
 				end
 			end
 
@@ -265,7 +265,7 @@ module Rabbit
 
 		def handler_endprocess(pid, tid, info)
 			vprint "#{pid}:#{tid} process quit."
-			prehandler_endprocess(pid, tid, info)
+			@dbg.prehandler_endprocess(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
 		end
 
