@@ -2,6 +2,7 @@
 
 $:.unshift('.')
 require 'lib/metasm/metasm'
+require 'symbols'
 require 'utils'
 
 module Rabbit
@@ -15,7 +16,7 @@ module Rabbit
 			@pid = nil
 			@cpu = Metasm::Ia32.new(32) # at the moment we're just testing on 32bit
 			@breakpoints = {}
-			@handlers = {
+			@handlers = { # this might be better as an array of hashes so we can specify actions like continue or not
 				Metasm::WinAPI::EXCEPTION_DEBUG_EVENT       => :handler_exception,
 				Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT  => :handler_newprocess,
 				Metasm::WinAPI::CREATE_THREAD_DEBUG_EVENT   => :handler_newthread,
@@ -26,7 +27,6 @@ module Rabbit
 				Metasm::WinAPI::OUTPUT_DEBUG_STRING_EVENT   => :handler_debugstring,
 				Metasm::WinAPI::RIP_EVENT                   => :handler_rip
 			}
-
 			# check if we have debug privs
 			if not Metasm::WinOS.get_debug_privilege
 				abort "[error] - Failed to get debug privilege, quiting."
@@ -116,6 +116,7 @@ module Rabbit
 			@pid = pid
 		end
 
+		# this needs some work, we will want to actually break on startup but this is running and then attaching
 		def load(target, debug_child = false)
 			paths = ENV['PATH'].split(';')
 			pid = nil
@@ -133,6 +134,7 @@ module Rabbit
 				@dbg = Metasm::WinDbgAPI.new(pid)
 				@mem = @dbg.mem
 				@hprocess = @dbg.hprocess
+				#Rabbit::Symbols.init(@hprocess)
 			else
 				abort "[error] - Could not execute #{exe}."
 			end
@@ -152,6 +154,7 @@ module Rabbit
 				@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
 				@mem = @dbg.mem
 				@hprocess = @dbg.hprocess
+				#Rabbit::Symbols.init(@hprocess)
 			else
 				proc = Metasm::WinOS.find_process(pid)
 				if proc
@@ -161,6 +164,7 @@ module Rabbit
 					@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
 					@mem = @dbg.mem
 					@hprocess = @dbg.hprocess
+					#Rabbit::Symbols.init(@hprocess)
 				end
 			end
 		end
@@ -212,19 +216,26 @@ module Rabbit
 		end
 
 		def handler_exception(pid, tid, info)
-			ctx = get_context(pid, tid)
-			regs = "eax: %08x ebx: %08x ecx: %08x edx: %08x esi: %08x edi: %08x\neip: %08x esp: %08x ebp: %08x" % 
-				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp]]
+			ctx = @dbg.get_context(pid, tid)
+			regs = "eax: %08x ebx: %08x ecx: %08x edx: %08x esi: %08x edi: %08x\neip: %08x esp: %08x ebp: %08x\nefl: %08x" % 
+				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp], ctx[:eflags]]
 
 			exe = Metasm::ExeFormat.new(Metasm::Ia32.new)
 			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip])
 			opcode = @mem[pid][ctx[:eip], inst.bin_length].to_s.unpack("H*")[0]
 
-			disasm = "%08x\t%s\t%s" % [ctx[:eip], opcode, inst.instruction]
+			disasm = "%08x %s\t\t%s" % [ctx[:eip], opcode, inst.instruction]
 
 			case info.code
 			when Metasm::WinAPI::STATUS_ACCESS_VIOLATION
 				status = "Access violation exception - %08x " % info.code
+
+				if info.firstchance == 0
+					status << "(first chance) "
+				else
+					status << "(second chance) "
+				end
+
 				if info.nparam >= 1
 					case info.info[0]
 					when 0
@@ -270,6 +281,7 @@ module Rabbit
 		end
 
 		def handler_newprocess(pid, tid, info)
+			Rabbit::Symbols.new(pid, @hprocess[pid])
 			Metasm::WinAPI::DBG_CONTINUE
 		end
 
