@@ -1,13 +1,18 @@
 require 'lib/metasm/metasm'
 
 module Rabbit
-	class Symbols
+	module Debug
 		SYMOPT_CASE_INSENSITIVE = 0x00000001
 		SYMOPT_UNDNAME          = 0x00000002
 		SYMOPT_DEFERRED_LOADS   = 0x00000004
 		SYMOPT_DEBUG            = 0x80000000
 		SYMOPT_LOAD_LINES       = 0x00000010
 		SYMOPT_NO_PROMPTS       = 0x00080000
+
+		Metasm::WinAPI.new_api_c( 'WINBASEAPI HMODULE WINAPI LoadLibraryA( __in LPCSTR lpLibFileName );', 'kernel32')
+		Metasm::WinAPI.new_api_c( 'WINBASEAPI LPVOID WINAPI GetProcAddress( __in HMODULE hModule, __in LPCSTR lpProcName );', 'kernel32')
+		Metasm::WinAPI.new_api_c( 'WINBASEAPI DWORD WINAPI WaitForSingleObject( __in HANDLE hHandle, __in DWORD dwMilliseconds );', 'kernel32')
+		Metasm::WinAPI.new_api_c( 'WINUSERAPI DWORD WINAPI WaitForInputIdle( __in HANDLE hProcess, __in DWORD dwMilliseconds );', 'user32')
 
 		Metasm::WinAPI.new_api_c( 'typedef struct _SYMBOL_INFO {
 		  ULONG   SizeOfStruct;
@@ -38,38 +43,38 @@ module Rabbit
 		Metasm::WinAPI.new_api_c('WINUSERAPI BOOL WINAPI SymFromIndex( __in HANDLE hProcess, __in DWORD64 BaseOfDll, __in DWORD Index, __inout LPSYMBOL_INFO Symbol );', '.\\data\\dbghelp.dll' )
 		Metasm::WinAPI.new_api_c('WINUSERAPI BOOL WINAPI SymRefreshModuleList( __in HANDLE hProcess );', '.\\data\\dbghelp.dll' )
 		Metasm::WinAPI.new_api_c('WINUSERAPI BOOL WINAPI SymSetSearchPath( __in HANDLE hProcess, __in_opt LPCSTR SearchPath );', '.\\data\\dbghelp.dll' )
-		attr_accessor :symbol_server
+		class Symbols
+			def initialize(pid, handle)
+				@handle = handle
+				@pid = pid
+				Metasm::WinAPI.loadlibrarya( ".\\data\\dbghelp.dll" )
+				Metasm::WinAPI.loadlibrarya( ".\\data\\symsrv.dll" )
+				@symbol_server = ENV['_NT_SYMBOL_PATH'] || "SRV*C:\\symbols*http://msdl.microsoft.com/download/symbols"
 
-		def initialize(pid, handle)
-			@handle = handle
-			@pid = pid
-			Metasm::WinAPI.loadlibrarya( ".\\data\\dbghelp.dll" )
-			Metasm::WinAPI.loadlibrarya( ".\\data\\symsrv.dll" )
-			@symbol_server = ENV['_NT_SYMBOL_PATH']
+				symopts = Metasm::WinAPI.symgetoptions()
+				symopts |= SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS
+				Metasm::WinAPI.symsetoptions( symopts )
 
-			symopts = Metasm::WinAPI.symgetoptions()
-			symopts |= SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS
-			Metasm::WinAPI.symsetoptions( symopts )
+				Metasm::WinAPI.symsetsearchpath(handle, @symbol_server.dup)
+				puts "Symbol search path is: #{@symbol_server}"
+				Metasm::WinAPI.syminitialize( @handle, @symbol_server, true )
+				# initialize symbols
+			end
 
-			Metasm::WinAPI.symsetsearchpath(handle, @symbol_server.dup)
-			puts "Symbol search path is: #{@symbol_server}"
-			Metasm::WinAPI.syminitialize( @handle, @symbol_server, true )
-			# initialize symbols
-		end
+			def refresh_symbols
+				Metasm::WinAPI.symrefreshmodulelist(@handle)
+			end
 
-		def refresh_symbols
-			Metasm::WinAPI.symrefreshmodulelist(@handle)
-		end
+			# ntdll!FunctionName -> address
+			def resolve_symbol(sym)
+				mod, func = sym.split('!')
+			end
 
-		# ntdll!FunctionName -> address
-		def resolve_symbol(sym)
-			mod, func = sym.split('!')
-		end
+			def resolve_addr(address)
+			end
 
-		def resolve_addr(address)
-		end
-
-		def addr_to_modoff(address)
+			def addr_to_modoff(address)
+			end
 		end
 	end
 end

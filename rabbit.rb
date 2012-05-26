@@ -9,7 +9,7 @@ module Rabbit
 
 	class Debugger
 		include Rabbit::Utils # contains code for verbose printing
-		include Rabbit::Symbols # code for symbol look ups
+		include Rabbit::Debug # code for symbol look ups
 
 		def initialize
 			@dbg = nil
@@ -281,7 +281,8 @@ module Rabbit
 		end
 
 		def handler_newprocess(pid, tid, info)
-			Rabbit::Symbols.new(pid, @hprocess[pid])
+			puts "Initializing symbols..."
+			@symbols = Rabbit::Debug::Symbols.new(pid, @hprocess[pid])
 			Metasm::WinAPI::DBG_CONTINUE
 		end
 
