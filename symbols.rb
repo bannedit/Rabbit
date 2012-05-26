@@ -1,7 +1,7 @@
 require 'lib/metasm/metasm'
 
 module Rabbit
-	module Symbols
+	class Symbols
 		SYMOPT_CASE_INSENSITIVE = 0x00000001
 		SYMOPT_UNDNAME          = 0x00000002
 		SYMOPT_DEFERRED_LOADS   = 0x00000004
