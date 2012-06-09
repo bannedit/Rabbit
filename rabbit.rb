@@ -37,7 +37,6 @@ module Rabbit
 
 		def enable_bp(addr, type = :bpx)
 			return if not b = Metasm::Debugger::Breakpoint.new
-#			puts "enable bp: %x" % addr
 			b.address = addr
 			b.type = type
 			b.state = :enabled
@@ -48,7 +47,6 @@ module Rabbit
 		def disable_bp(addr)
 			@breakpoints.each do |bp|
 				if bp.has_value?(addr)
-#					puts "disable bp: %x" % addr
 					@cpu.dbg_disable_bp(self, bp[:addr], bp[:bp])
 					bp[:bp].state = :disabled
 					bp[:state] = "disabled"
@@ -60,6 +58,9 @@ module Rabbit
 		def delete_bp(addr)
 			@breakpoints.each do |bp|
 				if bp.has_value?(addr)
+					if @dbg.mem[@pid][bp[:addr]] == "\xcc"
+						@cpu.dbg_disable_bp(self, bp[:addr], bp[:bp]) # ensure the bp is disabled
+					end
 					@breakpoints.delete(bp)
 				end
 			end

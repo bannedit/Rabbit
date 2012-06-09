@@ -15,3 +15,13 @@ Planned Features
 * Single stepping
 * X86_64 support
 * Symbol processing via dbghlp.dll
+
+Example Usage
+=============
+```ruby
+rabbit = Rabbit::Debugger.new
+rabbit.load("calc.exe")
+rabbit.enable_bp(0x01007b0e) # break on loading the help dialog
+rabbit.list_bps # list all breakpoints
+rabbit.run # let calc.exe run
+```
