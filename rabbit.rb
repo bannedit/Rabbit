@@ -11,11 +11,13 @@ module Rabbit
 		include Rabbit::Utils # contains code for verbose printing
 		include Rabbit::Debug # code for symbol look ups
 
+		attr_accessor :memory
+
 		def initialize
 			@dbg = nil
 			@pid = nil
 			@cpu = Metasm::Ia32.new(32) # at the moment we're just testing on 32bit
-			@breakpoints = {}
+			@breakpoints = []
 			@handlers = { # this might be better as an array of hashes so we can specify actions like continue or not
 				Metasm::WinAPI::EXCEPTION_DEBUG_EVENT       => :handler_exception,
 				Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT  => :handler_newprocess,
@@ -33,28 +35,40 @@ module Rabbit
 			end
 		end
 
-		def enable_bp(addr)
-			return if not b = @breakpoint[addr]
-			@cpu.dbg_enable_bp(self, addr, b)
+		def enable_bp(addr, type = :bpx)
+			return if not b = Metasm::Debugger::Breakpoint.new
+#			puts "enable bp: %x" % addr
+			b.address = addr
+			b.type = type
 			b.state = :enabled
-			@breakpoints << {addr => "enabled"}
+			@cpu.dbg_enable_bp(self, addr, b)
+			@breakpoints << {:addr => addr, :state => "enabled", :bp => b, :type => type}
 		end
 
 		def disable_bp(addr)
-			return if not b = @breakpoint[addr]
-			@cpu.dbg_disable_bp(self, addr, b)
-			b.state = :disabled
-			@breakpoints << {addr => "disabled"}
+			@breakpoints.each do |bp|
+				if bp.has_value?(addr)
+#					puts "disable bp: %x" % addr
+					@cpu.dbg_disable_bp(self, bp[:addr], bp[:bp])
+					bp[:bp].state = :disabled
+					bp[:state] = "disabled"
+					break
+				end
+			end
 		end
 
 		def delete_bp(addr)
-			@breakpoints.delete(addr)
+			@breakpoints.each do |bp|
+				if bp.has_value?(addr)
+					@breakpoints.delete(bp)
+				end
+			end
 		end
 
 		def list_bps
 			cnt = 0
-			@breakpoints.each do |addr, status|
-				puts "#{cnt} %08x - #{status}" % addr
+			@breakpoints.each do |bp|
+				puts "#{cnt} %08x - %s" % [bp[:addr], bp[:state]]
 				cnt += 1
 			end
 		end
@@ -132,7 +146,7 @@ module Rabbit
 				vprint "Created process #{exe} - #{pid}"
 				@pid = pid
 				@dbg = Metasm::WinDbgAPI.new(pid)
-				@mem = @dbg.mem
+				@memory = @dbg.mem[pid]
 				@hprocess = @dbg.hprocess
 				#Rabbit::Symbols.init(@hprocess)
 			else
@@ -152,7 +166,7 @@ module Rabbit
 					vprint "Attaching to #{@pid} - #{exe} by name"
 				end
 				@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
-				@mem = @dbg.mem
+				@memory = @dbg.mem[@pid]
 				@hprocess = @dbg.hprocess
 				#Rabbit::Symbols.init(@hprocess)
 			else
@@ -162,7 +176,7 @@ module Rabbit
 					exe = proc.modules.first.path
 					vprint "Attaching to #{@pid} - #{exe} by pid"
 					@dbg = Metasm::WinDbgAPI.new(@pid, debug_child)
-					@mem = @dbg.mem
+					@memory = @dbg.mem[@pid]
 					@hprocess = @dbg.hprocess
 					#Rabbit::Symbols.init(@hprocess)
 				end
@@ -174,14 +188,37 @@ module Rabbit
 			Metasm::WinAPI::DBG_CONTINUE
 		end
 
+		def break
+			Metasm::WinAPI.debugbreakprocess(@dbg.hprocess[@pid])
+		end
+
 		def run
 			if not @dbg
 				abort "Debugger could not attach to or execute a process"
 			end
-
+			@state = :running
 			@dbg.loop do |pid_, tid, code, info|
 				case code
 				when Metasm::WinAPI::EXCEPTION_DEBUG_EVENT
+					ctx = @dbg.get_context(pid_, tid)
+
+					if info.code == Metasm::WinAPI::STATUS_BREAKPOINT
+						@breakpoints.each do |bp|
+							if (ctx[:eip] - 1) == bp[:addr] # we already executed the int 3 so eip - 1
+								@dbg.mem[pid_][bp[:addr]] = bp[:bp].previous # disable the bp
+								@lastbp = bp[:addr]
+								ctx[:eflags] |= 0x100 # set singlestep mode
+								ctx[:eip] = ctx[:eip] - 1 # fix up eip so we can execute the real instruction
+							end
+						end
+					end
+
+					if info.code == Metasm::WinAPI::STATUS_SINGLE_STEP
+						if (ctx[:eip] - 1) == @lastbp
+							@dbg.mem[pid_][@lastbp] = "\xcc" # re-enable the bp
+							# we write directly as theres no need to track this bp, we already do
+						end
+					end
 					send(@handlers[Metasm::WinAPI::EXCEPTION_DEBUG_EVENT], pid_, tid, info)
 
 				when Metasm::WinAPI::CREATE_PROCESS_DEBUG_EVENT
@@ -220,11 +257,12 @@ module Rabbit
 			regs = "eax: %08x ebx: %08x ecx: %08x edx: %08x esi: %08x edi: %08x\neip: %08x esp: %08x ebp: %08x\nefl: %08x" % 
 				[ctx[:eax], ctx[:ebx], ctx[:ecx], ctx[:edx], ctx[:esi], ctx[:edi], ctx[:eip], ctx[:esp], ctx[:ebp], ctx[:eflags]]
 
-			exe = Metasm::ExeFormat.new(Metasm::Ia32.new)
-			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@mem[pid][ctx[:eip], 16]), ctx[:eip])
-			opcode = @mem[pid][ctx[:eip], inst.bin_length].to_s.unpack("H*")[0]
+			exe = Metasm::ExeFormat.new(Metasm::Ia32.new(32))
+			inst = exe.cpu.decode_instruction( Metasm::EncodedData.new(@dbg.mem[pid][ctx[:eip], 16]), ctx[:eip])
+			#puts inst.inspect
+			opcode = @dbg.mem[pid][ctx[:eip], inst.bin_length].to_s.unpack("H*")[0]
 
-			disasm = "%08x %s\t\t%s" % [ctx[:eip], opcode, inst.instruction]
+			disasm = "%08x %s\t\t%s\n\n" % [ctx[:eip], opcode, inst.instruction]
 
 			case info.code
 			when Metasm::WinAPI::STATUS_ACCESS_VIOLATION
@@ -253,10 +291,12 @@ module Rabbit
 			when Metasm::WinAPI::STATUS_BREAKPOINT
 				status = "Break instruction exception - %08x " % info.code
 				status_msg(status, regs, disasm)
+				@state = :stopped
 				Metasm::WinAPI::DBG_CONTINUE
 
-			when WinAPI::STATUS_SINGLE_STEP
-				# not yet implemented
+			when Metasm::WinAPI::STATUS_SINGLE_STEP
+				status = "Single step exception - %08x " % info.code
+				#status_msg(status, regs, disasm)
 				Metasm::WinAPI::DBG_CONTINUE
 
 			else
@@ -277,6 +317,12 @@ module Rabbit
 		def handler_endprocess(pid, tid, info)
 			vprint "#{pid}:#{tid} process quit."
 			@dbg.prehandler_endprocess(pid, tid, info)
+			Metasm::WinAPI::DBG_CONTINUE
+		end
+		
+		def handler_newthread(pid, tid, info)
+			vprint "#{pid}:#{tid} new thread"
+			@dbg.handler_newthread(pid, tid, info)
 			Metasm::WinAPI::DBG_CONTINUE
 		end
 
